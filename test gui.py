@@ -1,185 +1,25 @@
-import logging
+# ZE / APS Measurement GUI
+# main file
+# TODO: change keithley_gatecurrent to HPPT
+# TODO: implement AUX PSU control (voltage, current, enable/disable)
+# TODO: implement oscilloscope control (trigger, timebase, channels, data saving)
+# TODO: implement all APS control functions (from C code)
+# TODO: new setup window to select test and connect devices
 
+import logging
+import os
+import json
+import base64
 import sys
-import random
-from time import sleep
-from pymeasure.display.Qt import QtWidgets
+from pymeasure.display.Qt import QtWidgets, QtCore
 from pymeasure.display.windows.managed_dock_window import ManagedDockWindow
-from pymeasure.experiment import Procedure
-from pymeasure.experiment import IntegerParameter, FloatParameter, Parameter
+from procedures.random_procedure import RandomProcedure
+from procedures.keithley_gatecurrent import Keithley_gatecurrent_Procedure
 
 from PyQt5.QtGui import QIcon
 
 log = logging.getLogger(__name__)
 log.addHandler(logging.NullHandler())
-
-
-class RandomProcedure(Procedure):
-    name = 'Random Number Generator'
-    iterations = IntegerParameter('Loop Iterations', default=10)
-    delay = FloatParameter('Delay Time', units='s', default=0.2)
-    seed = Parameter('Random Seed', default='12345')
-
-    DATA_COLUMNS = ['Iteration', 'Random Number 1', 'Random Number 2', 'Random Number 3']
-
-    def startup(self):
-        log.info("Setting the seed of the random number generator")
-        random.seed(self.seed)
-
-    def execute(self):
-        log.info("Starting the loop of %d iterations" % self.iterations)
-        for i in range(self.iterations):
-            data = {
-                'Iteration': i,
-                'Random Number 1': random.random(),
-                'Random Number 2': random.random(),
-                'Random Number 3': random.random()
-            }
-            self.emit('results', data)
-            log.debug("Emitting results: %s" % data)
-            self.emit('progress', 100 * i / self.iterations)
-            sleep(self.delay)
-            if self.should_stop():
-                log.warning("Caught the stop flag in the procedure")
-                break
-
-
-class Keithley_gatecurrent_Procedure(Procedure):
-    name = 'Keithley Gate Current Measurement'
-    resource = Parameter('Instrument resource', default='')
-    voltage = FloatParameter('Source voltage', units='V', default=20.0)
-    compliance = FloatParameter('Compliance current', units='A', default=0.1)
-
-    DATA_COLUMNS = ['Voltage (V)', 'Current (A)']
-
-    def startup(self):
-        """Open the instrument using pymeasure Keithley classes if available.
-
-        If no resource is provided or opening fails, self.smu remains None and
-        execute() will emit NaN values.
-        """
-        self.smu = None
-        if not self.resource:
-            log.warning('No instrument resource provided for Keithley2470Procedure')
-            return
-
-        try:
-            from pymeasure.instruments import keithley as keithley_mod
-            for cls_name in ('Keithley2470', 'Keithley2460', 'Keithley2450', 'Keithley2400'):
-                cls = getattr(keithley_mod, cls_name, None)
-                if cls is None:
-                    continue
-                try:
-                    self.smu = cls(self.resource)
-                    log.info(f'Opened instrument with {cls_name} via pymeasure')
-                    break
-                except Exception:
-                    log.debug(f'Failed to open resource {self.resource} with {cls_name}')
-                    self.smu = None
-        except Exception:
-            log.debug('pymeasure keithley module not available')
-
-        if self.smu is None:
-            log.warning('Could not open Keithley via pymeasure; no instrument available')
-
-    def execute(self):
-        """Set source voltage, enable output, measure current, then disable output.
-
-        Emits a single results row with the voltage and measured current.
-        """
-        voltage = float(self.voltage)
-        current = float('nan')
-
-        if self.smu is not None:
-            try:
-                # Set voltage
-                if hasattr(self.smu, 'apply_voltage'):
-                    try:
-                        self.smu.apply_voltage(voltage, float(self.compliance))
-                    except Exception:
-                        self.smu.apply_voltage(voltage)
-                else:
-                    # set attribute; let exceptions propagate to outer handler
-                    setattr(self.smu, 'source_voltage', voltage)
-
-                # Enable output
-                if hasattr(self.smu, 'enable_source'):
-                    self.smu.enable_source()
-                elif hasattr(self.smu, 'enable_output'):
-                    self.smu.enable_output()
-                else:
-                    if hasattr(self.smu, 'write'):
-                        self.smu.write('OUTP ON')
-
-                # wait for settling
-                sleep(0.1)
-
-                # Measure current
-                if hasattr(self.smu, 'measure_current'):
-                    val = self.smu.measure_current()
-                    # handle single values or arrays
-                    if hasattr(val, '__iter__'):
-                        current = float(val[0])
-                    else:
-                        current = float(val)
-                else:
-                    if hasattr(self.smu, 'current'):
-                        current = float(getattr(self.smu, 'current'))
-                    if hasattr(self.smu, 'ask'):
-                        resp = self.smu.ask('MEAS:CURR?')
-                        current = float(resp)
-                    elif hasattr(self.smu, 'query'):
-                        resp = self.smu.query('MEAS:CURR?')
-                        current = float(resp)
-
-            except Exception as e:
-                log.exception('Error during pymeasure instrument sequence: %s', e)
-            finally:
-                # Disable output
-                if hasattr(self.smu, 'disable_source'):
-                    try:
-                        self.smu.disable_source()
-                    except Exception:
-                        log.debug('disable_source failed', exc_info=True)
-                if hasattr(self.smu, 'disable_output'):
-                    try:
-                        self.smu.disable_output()
-                    except Exception:
-                        log.debug('disable_output failed', exc_info=True)
-                if hasattr(self.smu, 'write'):
-                    try:
-                        self.smu.write('OUTP OFF')
-                    except Exception:
-                        log.debug('write OUTP OFF failed', exc_info=True)
-
-        else:
-            log.warning('No SMU available for measurement; emitting NaN')
-
-        # Emit results
-        self.emit('results', {'Voltage (V)': voltage, 'Current (A)': current})
-
-    def shutdown(self):
-        try:
-            if self.smu is not None:
-                if hasattr(self.smu, 'disable_source'):
-                    try:
-                        self.smu.disable_source()
-                    except Exception:
-                        log.debug('disable_source failed in shutdown', exc_info=True)
-                if hasattr(self.smu, 'disable_output'):
-                    try:
-                        self.smu.disable_output()
-                    except Exception:
-                        log.debug('disable_output failed in shutdown', exc_info=True)
-                if hasattr(self.smu, 'close'):
-                    try:
-                        self.smu.close()
-                    except Exception:
-                        log.debug('close failed in shutdown', exc_info=True)
-                self.smu = None
-        except Exception:
-            log.debug('Exception in Keithley2470Procedure.shutdown', exc_info=True)
-
 
 class MainWindow(ManagedDockWindow):
 
@@ -206,19 +46,21 @@ class MainWindow(ManagedDockWindow):
 
         # Procedure selector combobox: allow the user to switch the procedure class
         try:
-            # Map display name -> (procedure_class, inputs_list, x_axis_labels, y_axis_labels)
+            # Map display name -> (procedure_class, inputs_list, x_axis_labels, y_axis_labels, displays)
             self._procedure_infos = {
                 'RandomProcedure': (
                     RandomProcedure,
                     ['iterations', 'delay'],
                     ['Iteration'],
                     ['Random Number 1', 'Random Number 2'],
+                    ['iterations', 'delay'],
                 ),
                 'Keithley Gate Current': (
                     Keithley_gatecurrent_Procedure,
                     ['resource', 'voltage', 'compliance'],
                     ['Voltage (V)'],
                     ['Current (A)'],
+                    ['resource', 'voltage', 'compliance'],
                 ),
             }
             self.procedure_selector = QtWidgets.QComboBox(parent=self)
@@ -233,7 +75,12 @@ class MainWindow(ManagedDockWindow):
                 if cls is type(self.procedure_class) or cls == self.procedure_class:
                     start_name = k
                     break
-            if start_name:
+            # Restore last selection from settings, else use current class
+            settings = QtCore.QSettings('ZE', 'APS Measurement GUI')
+            saved = settings.value('last_procedure', type=str)
+            if saved and saved in self._procedure_infos:
+                self.procedure_selector.setCurrentText(saved)
+            elif start_name:
                 self.procedure_selector.setCurrentText(start_name)
 
             self.procedure_selector.currentTextChanged.connect(self._on_procedure_selected)
@@ -259,6 +106,51 @@ class MainWindow(ManagedDockWindow):
                 log.debug('Could not insert procedure selector into inputs dock', exc_info=True)
         except Exception:
             log.debug('Failed to create procedure selector', exc_info=True)
+
+        # Disable selector while running or queue non-empty
+        try:
+            self.manager.queued.connect(lambda _e: self._refresh_selector_enabled())
+            self.manager.running.connect(lambda _e: self._refresh_selector_enabled())
+            self.manager.finished.connect(lambda _e: self._refresh_selector_enabled())
+            self.manager.abort_returned.connect(lambda _e: self._refresh_selector_enabled())
+            self._refresh_selector_enabled()
+        except Exception:
+            log.debug('Failed to hook manager signals for selector enable/disable', exc_info=True)
+
+        # Apply saved dock layout and per-procedure data directory
+        try:
+            self._restore_layout()
+        except Exception:
+            log.debug('Failed to restore window layout', exc_info=True)
+        try:
+            if hasattr(self, 'procedure_selector'):
+                self._apply_procedure_directory(self.procedure_selector.currentText())
+        except Exception:
+            log.debug('Failed to apply initial procedure directory', exc_info=True)
+        # Persist directory changes whenever user edits the directory input
+        try:
+            self._attach_directory_input()
+        except Exception:
+            log.debug('Failed to hook directory input changes', exc_info=True)
+
+        # Periodically persist dock layouts and directory as a fallback
+        try:
+            self._last_saved_dir = None
+            self._last_saved_layout_payload = None
+            self._persist_timer = QtCore.QTimer(self)
+            self._persist_timer.setInterval(2000)
+            self._persist_timer.timeout.connect(self._periodic_persist)
+            self._persist_timer.start()
+        except Exception:
+            log.debug('Failed to start persistence timer', exc_info=True)
+
+        # Restore dock layout for current (initial) procedure
+        try:
+            dock = self._get_current_dock()
+            if dock is not None:
+                self._restore_dock_layout_for_proc(self._current_proc_name(), dock)
+        except Exception:
+            log.debug('Failed to restore initial dock layout', exc_info=True)
 
     def _enable_all_grids(self):
         """Helper to enable grids on all pyqtgraph plots, if pyqtgraph is
@@ -292,17 +184,39 @@ class MainWindow(ManagedDockWindow):
         that the input fields match the newly selected procedure.
         """
 
+        # Safety: prevent switching while experiments are queued/running unless confirmed
+        # Also persist selection immediately
+        try:
+            QtCore.QSettings('ZE', 'APS Measurement GUI').setValue('last_procedure', text)
+        except Exception:
+            pass
+
+        # If selector is disabled (running/queued), revert change (safety)
+        try:
+            if not self.procedure_selector.isEnabled():
+                for name, (cls0, *_rest) in self._procedure_infos.items():
+                    if cls0 == self.procedure_class:
+                        self.procedure_selector.blockSignals(True)
+                        self.procedure_selector.setCurrentText(name)
+                        self.procedure_selector.blockSignals(False)
+                        break
+                return
+        except Exception:
+            log.debug('Selector revert check failed', exc_info=True)
+
         info = self._procedure_infos.get(text)
         if info is None:
             log.warning('Selected unknown procedure: %s', text)
             return
-        cls, inputs_list, x_axis_labels, y_axis_labels = info
+        cls, inputs_list, x_axis_labels, y_axis_labels, displays = info
         if cls == self.procedure_class:
             return
 
         # Update the procedure class and current inputs list used by the window
         self.procedure_class = cls
         self._current_inputs_list = list(inputs_list)
+        # Update displays list used by browser
+        self.displays = list(displays)
 
         # Find the inputs dock and its layout so we can replace the InputsWidget
         for dock in self.findChildren(QtWidgets.QDockWidget):
@@ -368,7 +282,7 @@ class MainWindow(ManagedDockWindow):
 
         # Update the BrowserWidget to use the selected procedure's display parameters
         try:
-            self._update_browser_for_procedure(self.procedure_class)
+            self._update_browser_for_procedure(self.procedure_class, x_axis_labels, y_axis_labels)
         except Exception:
             log.debug('Failed to update browser for new procedure', exc_info=True)
 
@@ -379,9 +293,14 @@ class MainWindow(ManagedDockWindow):
             log.debug('Failed to update plots for new procedure', exc_info=True)
 
         log.info('Switched procedure to %s', text)
+        # Apply directory for this procedure after switching
+        try:
+            self._apply_procedure_directory(text)
+        except Exception:
+            log.debug('Failed to apply procedure directory on switch', exc_info=True)
 
 
-    def _update_browser_for_procedure(self, procedure_class):
+    def _update_browser_for_procedure(self, procedure_class, x_axis_labels=None, y_axis_labels=None):
         """Update the browser headers/columns to match the selected procedure.
 
         The Browser constructor sets header labels based on the procedure_class
@@ -392,13 +311,9 @@ class MainWindow(ManagedDockWindow):
             browser = self.browser_widget.browser
             # Keep measured_quantities as-is, but update procedure_class and display_parameters
             browser.procedure_class = procedure_class
-            display_parameters = list(getattr(procedure_class, 'DATA_COLUMNS', []))
-            # The Browser expects display_parameters to be parameter names (not DATA_COLUMNS)
-            # We'll try to reuse self.displays if provided; otherwise, try to use
-            # any Parameter attributes on the procedure_class that match DATA_COLUMNS.
-            # Fallback: keep existing display_parameters.
-            if hasattr(self, 'displays') and self.displays:
-                display_parameters = list(self.displays)
+            # Browser expects parameter attribute names for displays
+            display_parameters = list(self.displays) if getattr(self, 'displays', None) else list(browser.display_parameters)
+            browser.display_parameters = list(display_parameters)
 
             # Build header labels similar to Browser.__init__
             header_labels = ["Graph", "Filename", "Progress", "Status"]
@@ -411,6 +326,14 @@ class MainWindow(ManagedDockWindow):
 
             browser.setColumnCount(len(header_labels))
             browser.setHeaderLabels(header_labels)
+            # Reset measured quantities to only those relevant to current plots
+            labels = []
+            if x_axis_labels:
+                labels += list(x_axis_labels)
+            if y_axis_labels:
+                labels += list(y_axis_labels)
+            if labels:
+                browser.measured_quantities = set(labels)
         except Exception:
             log.exception('Error updating browser headers for new procedure', exc_info=True)
 
@@ -422,6 +345,11 @@ class MainWindow(ManagedDockWindow):
         and replace the existing one in the window's widget_list and tabs.
         """
         try:
+            # Save current procedure's dock layout before switching
+            try:
+                self._save_dock_layout_for_proc(self._current_proc_name())
+            except Exception:
+                pass
             # Find existing DockWidget in widget_list
             old_dock = None
             for w in list(self.widget_list):
@@ -459,13 +387,230 @@ class MainWindow(ManagedDockWindow):
                 self.widget_list = tuple(widget_list)
                 self.tabs.insertTab(0, new_dock, new_dock.name)
 
-            # Update browser measured_quantities if necessary
-            if hasattr(self, 'browser') and hasattr(new_dock, 'x_axis_labels'):
-                self.browser.measured_quantities.update(new_dock.x_axis_labels + new_dock.y_axis_labels)
+            # Restore dock layout for the (now) current procedure, if saved
+            try:
+                self._restore_dock_layout_for_proc(self._current_proc_name(), new_dock)
+            except Exception:
+                pass
+
+            # Update window-level axes and browser measured_quantities to match new labels exactly
+            try:
+                self.x_axis = list(new_dock.x_axis_labels)
+                self.y_axis = list(new_dock.y_axis_labels)
+            except Exception:
+                pass
+            try:
+                browser = self.browser_widget.browser
+                browser.measured_quantities = set(new_dock.x_axis_labels + new_dock.y_axis_labels)
+            except Exception:
+                pass
 
             log.info('Rebuilt DockWidget plots for procedure %s', procedure_class.__name__)
         except Exception:
             log.exception('Error rebuilding plots for new procedure', exc_info=True)
+
+    def _refresh_selector_enabled(self):
+        try:
+            running = self.manager.is_running()
+            queued = getattr(self.manager.experiments, 'has_next', lambda: False)()
+            self.procedure_selector.setEnabled(not (running or queued))
+        except Exception:
+            pass
+
+    # ----- Layout and data directory persistence -----
+    def _settings(self):
+        return QtCore.QSettings('ZE', 'APS Measurement GUI')
+
+    def _restore_layout(self):
+        s = self._settings()
+        geom = s.value('window/geometry', type=QtCore.QByteArray)
+        state = s.value('window/state', type=QtCore.QByteArray)
+        try:
+            if geom is not None:
+                self.restoreGeometry(geom)
+        except Exception:
+            log.debug('restoreGeometry failed', exc_info=True)
+        try:
+            if state is not None:
+                self.restoreState(state)
+        except Exception:
+            log.debug('restoreState failed', exc_info=True)
+
+    def _save_layout(self):
+        s = self._settings()
+        try:
+            s.setValue('window/geometry', self.saveGeometry())
+        except Exception:
+            log.debug('saveGeometry failed', exc_info=True)
+        try:
+            s.setValue('window/state', self.saveState())
+        except Exception:
+            log.debug('saveState failed', exc_info=True)
+
+    def _current_proc_name(self):
+        try:
+            return self.procedure_selector.currentText()
+        except Exception:
+            return getattr(self.procedure_class, 'name', self.procedure_class.__name__)
+
+    def _default_data_dir_for(self, proc_display_name: str) -> str:
+        # Default to ./data/<sanitized-name>
+        app_dir = os.path.dirname(os.path.abspath(__file__))
+        base = os.path.join(app_dir, 'data')
+        safe = proc_display_name.strip().replace(' ', '_')
+        return os.path.join(base, safe)
+
+    def _apply_procedure_directory(self, proc_display_name: str):
+        s = self._settings()
+        key = f'proc_dir_abs/{proc_display_name}'
+        directory = s.value(key, type=str)
+        if not directory:
+            directory = self._default_data_dir_for(proc_display_name)
+        try:
+            os.makedirs(directory, exist_ok=True)
+        except Exception:
+            log.debug('Failed to create directory %s', directory, exc_info=True)
+        # Update the window's directory used for new Results files
+        try:
+            self.directory = directory
+            if hasattr(self, 'directory_input') and self.directory_input is not None:
+                if self.directory_input.text() != directory:
+                    self.directory_input.setText(directory)
+            self._last_saved_dir = directory
+        except Exception:
+            log.debug('Failed to set window directory to %s', directory, exc_info=True)
+
+    def _persist_current_directory(self):
+        try:
+            proc_name = self._current_proc_name()
+            directory = getattr(self, 'directory', None)
+            if directory:
+                self._settings().setValue(f'proc_dir_abs/{proc_name}', directory)
+        except Exception:
+            log.debug('Failed to persist current directory', exc_info=True)
+
+    def closeEvent(self, event):
+        # Persist layout and current procedure directory on close
+        try:
+            self._save_layout()
+        except Exception:
+            pass
+        try:
+            # Save current dock layout for current procedure
+            self._save_dock_layout_for_proc(self._current_proc_name())
+        except Exception:
+            pass
+        try:
+            self._persist_current_directory()
+        except Exception:
+            pass
+        super().closeEvent(event)
+
+    # ---- Dock layouts (internal DockArea) per procedure ----
+    def _get_current_dock(self):
+        try:
+            for w in list(self.widget_list):
+                if getattr(w, 'plot_frames', None) is not None:
+                    return w
+        except Exception:
+            pass
+        return None
+
+    def _save_dock_layout_for_proc(self, proc_display_name: str):
+        dock = self._get_current_dock()
+        if dock is None:
+            return
+        state = None
+        try:
+            area = getattr(dock, 'area', None)
+            if area is None:
+                # Try alternative attribute names
+                area = getattr(dock, 'dock_area', None)
+            if area is None:
+                area = getattr(dock, 'dockArea', None)
+            if area is not None and hasattr(area, 'saveState'):
+                state = area.saveState()
+            elif hasattr(dock, 'saveState'):
+                state = dock.saveState()
+        except Exception:
+            log.debug('Failed to capture dock layout state', exc_info=True)
+        if state is None:
+            return
+        # Serialize state
+        try:
+            if isinstance(state, (bytes, bytearray)):
+                payload = 'b64:' + base64.b64encode(bytes(state)).decode('ascii')
+            elif hasattr(state, 'data'):
+                # QByteArray like
+                payload = 'b64:' + base64.b64encode(bytes(state.data())).decode('ascii')
+            else:
+                payload = 'json:' + json.dumps(state)
+            if payload != self._last_saved_layout_payload:
+                self._settings().setValue(f'dock_layout/{proc_display_name}', payload)
+                self._last_saved_layout_payload = payload
+        except Exception:
+            log.debug('Failed to persist dock layout state', exc_info=True)
+
+    def _restore_dock_layout_for_proc(self, proc_display_name: str, dock):
+        try:
+            payload = self._settings().value(f'dock_layout/{proc_display_name}', type=str)
+            if not payload:
+                return
+            state = None
+            if payload.startswith('b64:'):
+                state = base64.b64decode(payload[4:].encode('ascii'))
+            elif payload.startswith('json:'):
+                state = json.loads(payload[5:])
+            area = getattr(dock, 'area', None)
+            if area is None:
+                area = getattr(dock, 'dock_area', None)
+            if area is None:
+                area = getattr(dock, 'dockArea', None)
+            if area is not None and hasattr(area, 'restoreState'):
+                area.restoreState(state)
+            elif hasattr(dock, 'restoreState'):
+                dock.restoreState(state)
+        except Exception:
+            log.debug('Failed to restore dock layout state', exc_info=True)
+
+    def _attach_directory_input(self):
+        # Prefer attribute if present
+        if hasattr(self, 'directory_input') and self.directory_input is not None:
+            try:
+                self.directory_input.textChanged.connect(lambda _t: self._persist_current_directory())
+                self.directory_input.editingFinished.connect(self._persist_current_directory)
+                return
+            except Exception:
+                pass
+        # Fallback: scan for a QLineEdit that matches our current directory
+        try:
+            current_dir = getattr(self, 'directory', '')
+            for le in self.findChildren(QtWidgets.QLineEdit):
+                try:
+                    if le.text() == current_dir or 'directory' in le.objectName().lower():
+                        le.textChanged.connect(lambda _t: self._persist_current_directory())
+                        le.editingFinished.connect(self._persist_current_directory)
+                        self.directory_input = le
+                        break
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+    def _periodic_persist(self):
+        # Persist directory if changed
+        try:
+            dir_now = getattr(self, 'directory', None)
+            if dir_now and dir_now != self._last_saved_dir:
+                self._persist_current_directory()
+                self._last_saved_dir = dir_now
+        except Exception:
+            pass
+        # Persist current dock layout payload if changed
+        try:
+            self._save_dock_layout_for_proc(self._current_proc_name())
+        except Exception:
+            pass
 
 
 
