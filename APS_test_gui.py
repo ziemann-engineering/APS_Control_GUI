@@ -17,9 +17,12 @@ from procedures.random_procedure import RandomProcedure
 from procedures.keithley_gatecurrent import Keithley_gatecurrent_Procedure
 
 from PyQt5.QtGui import QIcon
+from datetime import datetime
 
 log = logging.getLogger(__name__)
-log.addHandler(logging.NullHandler())
+ 
+logging.basicConfig(filename=f"./logs/{datetime.now():%Y-%m-%d_%H-%M-%S}.log", encoding="utf-8", filemode="a", format='%(asctime)s - %(levelname)s - %(message)s')
+
 
 class MainWindow(ManagedDockWindow):
 
