@@ -1,5 +1,8 @@
 # Import necessary packages
 from pymeasure.instruments.keithley import Keithley2400
+from pymeasure.instruments.resources import list_resources
+from pymeasure.instruments import find_serial_port
+
 import numpy as np
 import pandas as pd
 from time import sleep
@@ -19,10 +22,8 @@ current_range = 1e-6  # A
 # Connect and configure the instrument
 # 2470 via USB: USB0::0x05e6::0x2470::[serial number]::INSTR
 
-from pymeasure.instruments.resources import list_resources
 list_resources()
 
-from pymeasure.instruments import find_serial_port
 resource_name = find_serial_port(vendor_id=0x05e6, product_id=0x2470, serial_number="sn56X")
 
 sourcemeter = Keithley2400("USB0::0x05e6::0x2470::[serial number]::INSTR")

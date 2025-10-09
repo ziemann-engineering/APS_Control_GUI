@@ -4,12 +4,19 @@ from time import sleep
 from pymeasure.experiment import Procedure
 from pymeasure.experiment import IntegerParameter, FloatParameter, Parameter
 
+#from datetime import datetime
+
 log = logging.getLogger(__name__)
-log.addHandler(logging.NullHandler())
 
 
 class RandomProcedure(Procedure):
-    name = 'Random Number Generator'
+    # common properties of the procedure
+    name = 'Random Number Test' # For display
+    internal_name = 'Random_Number_Test' # For internal use, no spaces or special chars
+    short_name = 'Random' # For directory naming
+    filename = r'{datetime.now():%Y-%m-%d_%H-%M-%S}' # Default filename pattern, can also use {date}, {time}, {measurement_voltage}, etc.
+
+    # parameters for the procedure
     iterations = IntegerParameter('Loop Iterations', default=10)
     delay = FloatParameter('Delay Time', units='s', default=0.2)
     seed = Parameter('Random Seed', default='12345')

@@ -1,0 +1,14 @@
+[gui]
+last_procedure = "HighPowerPulseTest"
+
+[window]
+geometry = "AdnQywADAAAAAAOgAAABrQAACdMAAAZRAAADoAAAAa0AAAnTAAAGUQAAAAAAAAAADwAAAAOgAAABrQAACdMAAAZR"
+state = "AAAA/wAAAAD9AAAAAQAAAAAAAAEeAAAEpfwCAAAAAfv/////AQAAAAAAAASlAAACFwD///8AAAUQAAAEpQAAAAQAAAAEAAAACAAAAAj8AAAAAA=="
+
+[directories]
+Random_Number_Test = "e:\\Projekte\\Ziemann Engineering\\Projekte\\rSCT\\Python Software\\data\\Random"
+High_Power_Pulse_Test = "e:\\Projekte\\Ziemann Engineering\\Projekte\\rSCT\\Python Software\\data\\HPPT"
+
+[docks]
+Random_Number_Test = "json:{\"main\": [\"vertical\", [[\"dock\", \"Dock 1\", {}], [\"dock\", \"Dock 2\", {}]], {\"sizes\": [249, 249]}], \"float\": []}"
+High_Power_Pulse_Test = "json:{\"main\": [\"vertical\", [[\"dock\", \"Dock 1\", {}], [\"dock\", \"Dock 2\", {}]], {\"sizes\": [249, 249]}], \"float\": []}"

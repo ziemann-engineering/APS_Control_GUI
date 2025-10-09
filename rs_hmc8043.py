@@ -1,33 +1,34 @@
 #!/usr/bin/env python3
 """
-Test script for controlling Rohde & Schwarz NGE103 power supplies.
+Test script for controlling Rohde & Schwarz HMC8043 power supply.
 Tests channel configuration, voltage/current setting, and output control.
 
 Requirements:
 - pyvisa
 
 Usage:
-    python test_rs_nge103.py
+    python test_rs_hmc8043.py
 """
 
 import pyvisa
 import time
 from typing import Optional, List, Dict
 
-class RSNGE103Controller:
-    """Controller for Rohde & Schwarz NGE103 power supply."""
+
+class RSHMC8043Controller:
+    """Controller for Rohde & Schwarz HMC8043 power supply."""
     
     def __init__(self, resource_string: str):
         """
         Initialize power supply connection.
         
         Args:
-            resource_string: VISA resource string (e.g., 'USB0::0x0AAD::0x0197::103456::INSTR')
+            resource_string: VISA resource string (e.g., 'USB0::0x0957::0x8B18::MY44012345::INSTR')
         """
         self.resource_string = resource_string
         self.psu: Optional[pyvisa.Resource] = None
         self.rm = pyvisa.ResourceManager()
-        self.num_channels = 3  # NGE103 has 3 channels
+        self.num_channels = 3  # HMC8043 has 3 channels
         
     def connect(self) -> bool:
         """Connect to the power supply."""
@@ -52,14 +53,14 @@ class RSNGE103Controller:
         self.rm.close()
     
     def reset(self):
-        """Reset power supply to default state."""
+        """Reset the power supply to default settings."""
         if not self.psu:
             raise RuntimeError("Not connected to power supply")
         
         print("Resetting power supply...")
         self.psu.write('*RST')
         self.psu.write('*CLS')
-        time.sleep(1)  # Wait for reset to complete
+        time.sleep(1)  # Allow time for reset
     
     def enable_output(self, channel: int, enabled: bool = True):
         """
@@ -77,7 +78,7 @@ class RSNGE103Controller:
         
         state = "ON" if enabled else "OFF"
         print(f"Channel {channel} output: {state}")
-        self.psu.write(f'OUTP{channel} {state}')
+        self.psu.write(f'OUTPut{channel} {state}')
     
     def set_voltage(self, channel: int, voltage: float):
         """
@@ -94,7 +95,7 @@ class RSNGE103Controller:
             raise ValueError(f"Channel must be between 1 and {self.num_channels}")
         
         print(f"Setting Channel {channel} voltage to {voltage} V")
-        self.psu.write(f'VOLT{channel} {voltage}')
+        self.psu.write(f'SOURce{channel}:VOLTage {voltage}')
     
     def set_current(self, channel: int, current: float):
         """
@@ -111,7 +112,7 @@ class RSNGE103Controller:
             raise ValueError(f"Channel must be between 1 and {self.num_channels}")
         
         print(f"Setting Channel {channel} current limit to {current} A")
-        self.psu.write(f'CURR{channel} {current}')
+        self.psu.write(f'SOURce{channel}:CURRent {current}')
     
     def get_voltage_setpoint(self, channel: int) -> Optional[float]:
         """
@@ -130,7 +131,7 @@ class RSNGE103Controller:
             raise ValueError(f"Channel must be between 1 and {self.num_channels}")
         
         try:
-            response = self.psu.query(f'VOLT{channel}?').strip()
+            response = self.psu.query(f'SOURce{channel}:VOLTage?').strip()
             voltage = float(response)
             return voltage
         except Exception as e:
@@ -154,7 +155,7 @@ class RSNGE103Controller:
             raise ValueError(f"Channel must be between 1 and {self.num_channels}")
         
         try:
-            response = self.psu.query(f'CURR{channel}?').strip()
+            response = self.psu.query(f'SOURce{channel}:CURRent?').strip()
             current = float(response)
             return current
         except Exception as e:
@@ -178,7 +179,7 @@ class RSNGE103Controller:
             raise ValueError(f"Channel must be between 1 and {self.num_channels}")
         
         try:
-            response = self.psu.query(f'MEAS:VOLT{channel}?').strip()
+            response = self.psu.query(f'MEASure:VOLTage? {channel}').strip()
             voltage = float(response)
             return voltage
         except Exception as e:
@@ -202,16 +203,16 @@ class RSNGE103Controller:
             raise ValueError(f"Channel must be between 1 and {self.num_channels}")
         
         try:
-            response = self.psu.query(f'MEAS:CURR{channel}?').strip()
+            response = self.psu.query(f'MEASure:CURRent? {channel}').strip()
             current = float(response)
             return current
         except Exception as e:
             print(f"Error measuring current for Channel {channel}: {e}")
             return None
     
-    def get_output_status(self, channel: int) -> Optional[bool]:
+    def get_output_state(self, channel: int) -> Optional[bool]:
         """
-        Get output status for specified channel.
+        Get output enable state for specified channel.
         
         Args:
             channel: Channel number (1-3)
@@ -226,10 +227,10 @@ class RSNGE103Controller:
             raise ValueError(f"Channel must be between 1 and {self.num_channels}")
         
         try:
-            response = self.psu.query(f'OUTP{channel}?').strip()
-            return response == '1'
+            response = self.psu.query(f'OUTPut{channel}?').strip()
+            return response == '1' or response.upper() == 'ON'
         except Exception as e:
-            print(f"Error reading output status for Channel {channel}: {e}")
+            print(f"Error reading output state for Channel {channel}: {e}")
             return None
     
     def get_channel_status(self, channel: int) -> Optional[Dict]:
@@ -248,7 +249,7 @@ class RSNGE103Controller:
         try:
             status = {
                 'channel': channel,
-                'output_enabled': self.get_output_status(channel),
+                'output_enabled': self.get_output_state(channel),
                 'voltage_setpoint': self.get_voltage_setpoint(channel),
                 'current_setpoint': self.get_current_setpoint(channel),
                 'voltage_measured': self.measure_voltage(channel),
@@ -261,32 +262,31 @@ class RSNGE103Controller:
     
     def get_all_channels_status(self) -> List[Dict]:
         """
-        Get status for all channels.
+        Get status of all channels.
         
         Returns:
-            List of status dictionaries for all channels
+            List of dictionaries containing channel status information
         """
-        statuses = []
+        status_list = []
+        
         for channel in range(1, self.num_channels + 1):
             status = self.get_channel_status(channel)
             if status:
-                statuses.append(status)
-        return statuses
+                status_list.append(status)
+        
+        return status_list
     
     def configure_channel(self, channel: int, voltage: float, current: float, 
                          enabled: bool = True):
         """
-        Configure a channel with voltage, current limit, and output state.
+        Configure a channel with voltage, current, and output state.
         
         Args:
             channel: Channel number (1-3)
-            voltage: Output voltage in V
+            voltage: Voltage setting in V
             current: Current limit in A
             enabled: Enable output after configuration
         """
-        if not (1 <= channel <= self.num_channels):
-            raise ValueError(f"Channel must be between 1 and {self.num_channels}")
-        
         print(f"Configuring Channel {channel}:")
         print(f"  Voltage: {voltage} V")
         print(f"  Current limit: {current} A")
@@ -307,33 +307,67 @@ class RSNGE103Controller:
             self.enable_output(channel, True)
     
     def emergency_stop(self):
-        """Disable all outputs immediately."""
+        """Emergency stop - disable all outputs immediately."""
         print("EMERGENCY STOP - Disabling all outputs!")
+        if not self.psu:
+            return
+        
         for channel in range(1, self.num_channels + 1):
             try:
                 self.enable_output(channel, False)
             except Exception as e:
                 print(f"Error disabling Channel {channel}: {e}")
     
-    def set_tracking_mode(self, mode: str = 'INDEP'):
+    def set_tracking_mode(self, mode: str):
         """
         Set tracking mode for channels.
         
         Args:
-            mode: Tracking mode ('INDEP', 'SER', 'PAR')
-                 INDEP = Independent (default)
-                 SER = Series tracking
-                 PAR = Parallel tracking
+            mode: Tracking mode ('INDEpendent', 'SERIes', 'PARAllel')
         """
         if not self.psu:
             raise RuntimeError("Not connected to power supply")
         
-        valid_modes = ['INDEP', 'SER', 'PAR']
+        valid_modes = ['INDEpendent', 'INDE', 'SERIes', 'SERI', 'PARAllel', 'PARA']
         if mode not in valid_modes:
-            raise ValueError(f"Mode must be one of {valid_modes}")
+            raise ValueError(f"Invalid tracking mode. Valid modes: {valid_modes}")
         
         print(f"Setting tracking mode to: {mode}")
-        self.psu.write(f'OUTP:TRACK {mode}')
+        self.psu.write(f'INSTrument:COUPle:TRIGger {mode}')
+    
+    def get_error_queue(self) -> List[str]:
+        """
+        Read error queue from the instrument.
+        
+        Returns:
+            List of error messages
+        """
+        if not self.psu:
+            raise RuntimeError("Not connected to power supply")
+        
+        errors = []
+        try:
+            while True:
+                error = self.psu.query('SYSTem:ERRor?').strip()
+                if error.startswith('+0,') or error.startswith('0,'):
+                    break  # No more errors
+                errors.append(error)
+                if len(errors) > 10:  # Prevent infinite loop
+                    break
+        except Exception as e:
+            print(f"Error reading error queue: {e}")
+        
+        return errors
+    
+    def check_errors(self):
+        """Check and display any errors from the instrument."""
+        errors = self.get_error_queue()
+        if errors:
+            print("Instrument Errors:")
+            for error in errors:
+                print(f"  {error}")
+        else:
+            print("No instrument errors")
 
 
 def print_channel_status(status: Dict):
@@ -344,18 +378,36 @@ def print_channel_status(status: Dict):
     print(f"  Current: {status['current_setpoint']:.3f} A (limit) / {status['current_measured']:.3f} A (measured)")
 
 
+def show_hmc8043_commands():
+    """Show HMC8043 SCPI commands."""
+    print("\n=== HMC8043 SCPI Commands ===")
+    print("Function                | Command")
+    print("-" * 40)
+    print("Set Voltage Ch1         | SOURce1:VOLTage 5.0")
+    print("Set Current Ch2         | SOURce2:CURRent 1.0") 
+    print("Enable Output Ch3       | OUTPut3 ON")
+    print("Measure Voltage Ch1     | MEASure:VOLTage? 1")
+    print("Measure Current Ch2     | MEASure:CURRent? 2")
+    print("Get Voltage Setting     | SOURce1:VOLTage?")
+    print("Tracking Mode           | INSTrument:COUPle:TRIGger INDEpendent")
+    print("-" * 40)
+
+
 def main():
-    """Test the power supply controller."""
+    """Test the HMC8043 power supply controller."""
     
     # Configuration
-    RESOURCE_STRING = 'USB0::0x0AAD::0x0197::103456::INSTR'  # Update with your PSU's address
+    RESOURCE_STRING = 'USB0::0x0957::0x8B18::MY44012345::INSTR'  # Update with your HMC8043 address
     
-    print("=== Rohde & Schwarz NGE103 Power Supply Test ===")
+    print("=== Rohde & Schwarz HMC8043 Power Supply Test ===")
+    
+    # Show commands
+    show_hmc8043_commands()
     
     # List available resources
     rm = pyvisa.ResourceManager()
     resources = rm.list_resources()
-    print(f"Available VISA resources: {resources}")
+    print(f"\nAvailable VISA resources: {resources}")
     
     if not resources:
         print("No VISA resources found. Please check connections.")
@@ -371,7 +423,7 @@ def main():
             return
     
     # Create controller and connect
-    psu = RSNGE103Controller(RESOURCE_STRING)
+    psu = RSHMC8043Controller(RESOURCE_STRING)
     
     if not psu.connect():
         print("Failed to connect to power supply")
@@ -382,7 +434,7 @@ def main():
         psu.reset()
         
         # Configure tracking mode
-        psu.set_tracking_mode('INDEP')
+        psu.set_tracking_mode('INDEpendent')
         
         print("\n=== Initial Configuration ===")
         
@@ -453,6 +505,9 @@ def main():
         if status:
             print_channel_status(status)
         
+        print("\n=== Error Check ===")
+        psu.check_errors()
+        
         print("\n=== Sequential Output Test ===")
         
         # Turn outputs on/off in sequence
@@ -476,6 +531,10 @@ def main():
         statuses = psu.get_all_channels_status()
         for status in statuses:
             print_channel_status(status)
+        
+        # Final error check
+        print("\n=== Final Error Check ===")
+        psu.check_errors()
         
     except KeyboardInterrupt:
         print("\nTest interrupted by user")
