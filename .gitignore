@@ -5,3 +5,4 @@ data/*
 logs/* 
 
 *code-workspace
+.vscode/settings.json
