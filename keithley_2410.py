@@ -13,8 +13,8 @@ min_current = -max_current
 
 # Set source_current and measure_voltage parameters
 voltage = 0.001 # V
-compliance_current = 0.1  # A
-measure_nplc = 1  # Number of power line cycles
+compliance_current = 0.001  # A
+measure_nplc = 10  # Number of power line cycles
 current_range = 1e-9  # A
 
 #list_resources()
@@ -26,17 +26,19 @@ sourcemeter = Keithley2400("GPIB::24")
 print(sourcemeter.id)
 sourcemeter.reset()
 sourcemeter.line_frequency = 50
+sourcemeter.wires = 2
 sourcemeter.use_front_terminals()
 sourcemeter.apply_voltage(voltage_range=None, compliance_current=compliance_current) # autorange, set compliance
 sourcemeter.source_voltage = voltage    # voltage to apply
-sourcemeter.measure_current(nplc=10, current=2e-9, auto_range=False) 
+sourcemeter.measure_concurrent_functions = False
+sourcemeter.measure_current(nplc=measure_nplc, current=2e-9, auto_range=False) 
 #sourcemeter.measure_voltage(nplc=10, voltage=0.002, auto_range=False)
 
 sourcemeter.enable_source()
 sleep(1)  # wait for voltage to settle
 
 a = monotonic()
-#print("Voltage:", sourcemeter.voltage, "V")
+print("Voltage:", sourcemeter.source_voltage, "V") # cant read voltage when sourcing voltage? at least with this code
 print("Current:", sourcemeter.current, "A")
 b = monotonic()
 
