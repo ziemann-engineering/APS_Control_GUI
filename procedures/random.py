@@ -14,6 +14,7 @@ class RandomProcedure(Procedure):
     name = 'Random Number Test' # For display
     internal_name = 'Random_Number_Test' # For internal use, no spaces or special chars
     short_name = 'Random' # For directory naming
+    description = "A simple test procedure that generates random numbers. No hardware required."
     filename = r'{datetime.now():%Y-%m-%d_%H-%M-%S}' # Default filename pattern, can also use {date}, {time}, {measurement_voltage}, etc.
 
     # parameters for the procedure
@@ -22,6 +23,18 @@ class RandomProcedure(Procedure):
     seed = Parameter('Random Seed', default='12345')
 
     DATA_COLUMNS = ['Iteration', 'Random Number 1', 'Random Number 2', 'Random Number 3']
+    
+    # GUI Configuration
+    INPUTS = ['iterations', 'delay', 'seed']
+    DISPLAYS = INPUTS
+    X_AXIS = 'Iteration'
+    Y_AXIS = ['Random Number 1', 'Random Number 2']
+    
+    # Hardware Configuration for Startup Dialog (no hardware needed)
+    HARDWARE = {}
+    
+    # Hardware Configuration for Startup Dialog (no hardware needed)
+    HARDWARE = {}
 
     def startup(self):
         log.info("Setting the seed of the random number generator")

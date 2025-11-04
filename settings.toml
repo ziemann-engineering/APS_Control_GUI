@@ -2,8 +2,8 @@
 last_procedure = "HighPowerPulseTest"
 
 [window]
-geometry = "AdnQywADAAAAAAOgAAABrQAACdMAAAZRAAADoAAAAa0AAAnTAAAGUQAAAAAAAAAADwAAAAOgAAABrQAACdMAAAZR"
-state = "AAAA/wAAAAD9AAAAAQAAAAAAAAEeAAAEpfwCAAAAAfv/////AQAAAAAAAASlAAACFwD///8AAAUQAAAEpQAAAAQAAAAEAAAACAAAAAj8AAAAAA=="
+geometry = "AdnQywADAAAAAAOgAAABrQAAClQAAAZBAAADoAAAAa0AAApUAAAGQQAAAAAAAAAADwAAAAOgAAABrQAAClQAAAZB"
+state = "AAAA/wAAAAD9AAAAAQAAAAAAAAEeAAAElfwCAAAAAfv/////AQAAAAAAAASVAAAEggD///8AAAWRAAAElQAAAAQAAAAEAAAACAAAAAj8AAAAAA=="
 
 [directories]
 Random_Number_Test = "e:\\Projekte\\Ziemann Engineering\\Projekte\\rSCT\\Python Software\\data\\Random"
@@ -11,4 +11,4 @@ High_Power_Pulse_Test = "e:\\Projekte\\Ziemann Engineering\\Projekte\\rSCT\\Pyth
 
 [docks]
 Random_Number_Test = "json:{\"main\": [\"vertical\", [[\"dock\", \"Dock 1\", {}], [\"dock\", \"Dock 2\", {}]], {\"sizes\": [249, 249]}], \"float\": []}"
-High_Power_Pulse_Test = "json:{\"main\": [\"vertical\", [[\"dock\", \"Dock 1\", {}], [\"dock\", \"Dock 2\", {}]], {\"sizes\": [249, 249]}], \"float\": []}"
+High_Power_Pulse_Test = "json:{\"main\": [\"vertical\", [[\"dock\", \"Dock 1\", {}], [\"dock\", \"Dock 2\", {}]], {\"sizes\": [246, 245]}], \"float\": []}"

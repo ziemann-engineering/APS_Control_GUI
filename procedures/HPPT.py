@@ -4,7 +4,7 @@ import os
 import time
 import re
 from pymeasure.experiment import Procedure
-from pymeasure.experiment import FloatParameter, Parameter, BooleanParameter
+from pymeasure.experiment import FloatParameter, Parameter, BooleanParameter, IntegerParameter
 
 #from datetime import datetime
 
@@ -20,19 +20,117 @@ class HighPowerPulseTest(Procedure):
     name = 'High Power Pulse Test (HPPT)' # For display
     internal_name = 'High_Power_Pulse_Test' # For internal use, no spaces or special chars
     short_name = 'HPPT' # For directory naming
+    description = "High Power Pulse Test using APS controller and Keithley SMU for current measurements."
     #filename = f'{datetime.now():%Y-%m-%d_%H-%M-%S}' # Default filename pattern, can also use {date}, {time}, {measurement_voltage}, etc.
 
-    # parameters for the procedure
+    # APS connection parameters
     aps_port = Parameter('APS Serial Port', default='COM3')
-    keithley_resource = Parameter('Keithley 2470 Resource', default='')
-    measurement_voltage = FloatParameter('Measurement voltage', units='V', default=20.0)
+    keithley_resource = Parameter('Keithley SMU Resource', default='')
+    
+    # HPPT test parameters (from firmware: voltage_v, on_time_ns, period_s, pulse_count, measurement)
+    test_voltage = FloatParameter('Test Voltage', units='V', default=100.0, 
+                                  minimum=0.0, maximum=2000.0)
+    dut_on_time = IntegerParameter('DUT On-Time', units='ns', default=100, 
+                                    minimum=14, maximum=3000)
+    pulse_period = FloatParameter('Pulse Period', units='ms', default=1.0, 
+                                   minimum=0.001, maximum=1000.0)
+    pulse_count = IntegerParameter('Pulse Count', default=1000, minimum=1, maximum=1000000)
+    gate_measurement = BooleanParameter('Wait for Gate Measurement', default=False)
+    
+    # NGE103 PSU parameters
+    nge103_ch1_voltage = FloatParameter('NGE103 Ch1 Voltage', units='V', default=24.0,
+                                        minimum=0.0, maximum=32.0)
+    nge103_ch1_current = FloatParameter('NGE103 Ch1 Current', units='A', default=0.1,
+                                        minimum=0.0, maximum=3.0)
+    nge103_ch2_voltage = FloatParameter('NGE103 Ch2 Voltage', units='V', default=5.0,
+                                        minimum=0.0, maximum=32.0)
+    nge103_ch2_current = FloatParameter('NGE103 Ch2 Current', units='A', default=0.1,
+                                        minimum=0.0, maximum=3.0)
+    nge103_ch3_voltage = FloatParameter('NGE103 Ch3 Voltage', units='V', default=15.0,
+                                        minimum=0.0, maximum=32.0)
+    nge103_ch3_current = FloatParameter('NGE103 Ch3 Current', units='A', default=0.1,
+                                        minimum=0.0, maximum=3.0)
+    
+    # Keithley measurement parameters
+    measurement_voltage = FloatParameter('Keithley Measurement Voltage', units='V', default=20.0)
+    
+    # General test parameters
     wait_for_completion = BooleanParameter('Wait for test completion', default=True)
-    timeout = FloatParameter('Test timeout', units='s', default=30.0)
+    timeout = FloatParameter('Test timeout', units='s', default=300.0)
 
     DATA_COLUMNS = ['Timestamp', 'Event Type', 'Message', 'Current (A)', 'Burst Count']
+    
+    # GUI Configuration
+    INPUTS = [
+        'aps_port', 
+        'keithley_resource', 
+        'test_voltage',
+        'dut_on_time',
+        'pulse_period',
+        'pulse_count',
+        'gate_measurement',
+        'measurement_voltage',
+        'wait_for_completion', 
+        'nge103_ch1_voltage',
+        'nge103_ch1_current',
+        'nge103_ch2_voltage',
+        'nge103_ch2_current',
+        'nge103_ch3_voltage',
+        'nge103_ch3_current',
+        'timeout'
+    ]
+    
+    DISPLAYS = INPUTS  # Display same parameters as inputs
+    
+    X_AXIS = 'Timestamp'
+    Y_AXIS = ['Current (A)', 'Burst Count']
+    
+    # Hardware Configuration for Startup Dialog
+    HARDWARE = {
+        'aps_controller': {
+            'display_name': 'APS Controller',
+            'parameters': {
+                'connection': {
+                    'label': 'Serial Port',
+                    'default': 'COM5',
+                    'placeholder': 'e.g., COM5, /dev/ttyUSB0'
+                }
+            }
+        },
+        'keithley_smu': {
+            'display_name': 'Keithley SMU',
+            'parameters': {
+                'connection': {
+                    'label': 'VISA Resource',
+                    'default': 'GPIB::24',
+                    'placeholder': 'e.g., GPIB::24'
+                }
+            }
+        },
+        'nge103_psu': {
+            'display_name': 'R&S NGE103 Power Supply',
+            'parameters': {
+                'connection': {
+                    'label': 'VISA Resource',
+                    'default': '',
+                    'placeholder': 'e.g., ASRL8::INSTR for COM8'
+                }
+            }
+        },
+        'keysight_oscilloscope': {
+            'display_name': 'Keysight Oscilloscope',
+            'parameters': {
+                'connection': {
+                    'label': 'VISA Resource',
+                    'default': 'USB0::0x2A8D::0x904A::MY58150189::INSTR',
+                    'placeholder': 'e.g., USB0::0x2A8D::0x904A::MY58150189::INSTR'
+                }
+            }
+        }
+    }
 
     def startup(self):
-        """Connect to the APS controller and Keithley 2470.
+        """Connect to the APS controller and Keithley SMU.
 
         If no port is provided or connection fails, instruments remain None and
         execute() will emit error status.
@@ -64,30 +162,30 @@ class HighPowerPulseTest(Procedure):
                 log.exception(f'Error initializing APS controller: {e}')
                 self.aps = None
 
-        # Initialize Keithley 2470
+        # Initialize Keithley SMU
         if not self.keithley_resource:
             log.warning('No Keithley resource provided - current measurements will be skipped')
         else:
             try:
                 from pymeasure.instruments import keithley
-                self.keithley = keithley.Keithley2470(self.keithley_resource)
-                log.info(f'Connected to Keithley 2470 on {self.keithley_resource}')
+                self.keithley = keithley.KeithleySMU(self.keithley_resource)
+                log.info(f'Connected to Keithley SMU on {self.keithley_resource}')
                 
-                # Configure Keithley for voltage source, current measurement
+                # Configure Keithley for current measurement (voltage will be set by procedure when needed)
                 self.keithley.reset()
                 self.keithley.use_front_terminals()
                 self.keithley.measure_current()
-                self.keithley.source_voltage = 0  # Start with 0V
                 self.keithley.compliance_current = 1.0  # 1A compliance
+                self.keithley.disable_source()  # Start with output disabled
                 
             except Exception as e:
-                log.exception(f'Error initializing Keithley 2470: {e}')
+                log.exception(f'Error initializing Keithley SMU: {e}')
                 self.keithley = None
 
         if self.aps is None:
             log.warning('Could not connect to APS controller; no instrument available')
         if self.keithley is None:
-            log.warning('Could not connect to Keithley 2470; current measurements will be skipped')
+            log.warning('Could not connect to Keithley SMU; current measurements will be skipped')
 
     def execute(self):
         """Execute HPPT test on APS controller with message monitoring.
@@ -120,9 +218,21 @@ class HighPowerPulseTest(Procedure):
                 return
 
             log.info('Starting HPPT test...')
+            log.info(f'Test parameters: Voltage={self.test_voltage}V, On-time={self.dut_on_time}ns, '
+                    f'Period={self.pulse_period}ms, Pulses={self.pulse_count}, '
+                    f'Gate measurement={self.gate_measurement}')
             
-            # Start HPPT test
-            start_response = self.aps.hppt_test()
+            # Convert pulse_period from ms to seconds for the command
+            period_s = self.pulse_period / 1000.0
+            
+            # Start HPPT test with all required parameters
+            start_response = self.aps.hppt_test(
+                voltage_v=self.test_voltage,
+                on_time_ns=self.dut_on_time,
+                period_s=period_s,
+                pulse_count=self.pulse_count,
+                measurement=self.gate_measurement
+            )
             log.info(f'HPPT test command response: {start_response}')
             
             if not start_response:
@@ -140,7 +250,7 @@ class HighPowerPulseTest(Procedure):
             self.emit('results', {
                 'Timestamp': time.time(),
                 'Event Type': 'Test Started',
-                'Message': 'HPPT test initiated successfully',
+                'Message': f'HPPT test: {self.test_voltage}V, {self.dut_on_time}ns, {self.pulse_count} pulses',
                 'Current (A)': float('nan'),
                 'Burst Count': self.burst_count
             })
@@ -284,18 +394,18 @@ class HighPowerPulseTest(Procedure):
         })
 
     def _measure_current_with_keithley(self):
-        """Perform current measurement with Keithley 2470.
+        """Perform current measurement with Keithley SMU.
         
         Returns:
             Measured current in Amperes, or NaN if measurement failed
         """
         if self.keithley is None:
-            log.warning('No Keithley available for current measurement')
+            log.warning('No Keithley SMU available for current measurement')
             return float('nan')
 
         try:
-            log.info(f'Enabling Keithley output at {self.measurement_voltage}V for current measurement')
-            
+            log.info(f'Enabling Keithley SMU output at {self.measurement_voltage}V for current measurement')
+
             # Set voltage and enable output
             self.keithley.source_voltage = self.measurement_voltage
             self.keithley.enable_source()

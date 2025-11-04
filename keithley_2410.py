@@ -19,7 +19,7 @@ current_range = 1e-9  # A
 
 #list_resources()
 
-#resource_name = find_serial_port(vendor_id=0x05e6, product_id=0x2470, serial_number="sn56X")
+#resource_name = find_serial_port(vendor_id=0x05e6, product_id=0x2410, serial_number="sn56X")
 
 #sourcemeter = Keithley2400("USB0::0x05e6::0x2410::[serial number]::INSTR")
 sourcemeter = Keithley2400("GPIB::24")

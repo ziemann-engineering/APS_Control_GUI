@@ -2,7 +2,7 @@
 Startup Configuration Dialog for ZE APS Measurement GUI
 
 This dialog allows users to:
-1. Select which measurement procedure to run
+1. Select which measurement procedure to run (auto-discovered from procedures folder)
 2. Configure hardware connections for the selected procedure
 3. Test connections before launching the main GUI
 """
@@ -10,22 +10,67 @@ This dialog allows users to:
 import logging
 import sys
 import os
+import importlib
+import inspect
+from pathlib import Path
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, 
     QPushButton, QComboBox, QLineEdit, QGroupBox,
-    QDoubleSpinBox,
     QApplication, QFrame
 )
 from PyQt5.QtCore import QThread, pyqtSignal, QTimer
 from PyQt5.QtGui import QFont, QIcon
 import toml
-from pathlib import Path
 
-# Import procedure classes
-from procedures.random import RandomProcedure
-from procedures.HPPT import HighPowerPulseTest
+from pymeasure.experiment import Procedure
 
 log = logging.getLogger(__name__)
+
+
+def discover_procedures():
+    """
+    Automatically discover all procedure classes in the procedures folder.
+    
+    Returns:
+        List of tuples: [(procedure_class, display_name), ...]
+    """
+    procedures = []
+    procedures_dir = Path(__file__).parent / 'procedures'
+    
+    if not procedures_dir.exists():
+        log.warning(f"Procedures directory not found: {procedures_dir}")
+        return procedures
+    
+    log.info(f"Discovering procedures in: {procedures_dir}")
+    
+    # Find all Python files in procedures directory (excluding __init__ and __pycache__)
+    for py_file in procedures_dir.glob('*.py'):
+        if py_file.name.startswith('__'):
+            continue
+        
+        module_name = py_file.stem
+        log.debug(f"Checking module: {module_name}")
+        
+        try:
+            # Import the module
+            module = importlib.import_module(f'procedures.{module_name}')
+            
+            # Find all Procedure subclasses in the module
+            for name, obj in inspect.getmembers(module, inspect.isclass):
+                # Check if it's a Procedure subclass (but not Procedure itself)
+                if issubclass(obj, Procedure) and obj is not Procedure:
+                    display_name = getattr(obj, 'name', name)
+                    log.info(f"Found procedure: {name} -> {display_name}")
+                    procedures.append((obj, display_name))
+        
+        except Exception as e:
+            log.error(f"Failed to load procedure from {module_name}: {e}")
+    
+    # Sort by display name
+    procedures.sort(key=lambda x: x[1])
+    log.info(f"Discovered {len(procedures)} procedures")
+    
+    return procedures
 
 
 class ConnectionTestThread(QThread):
@@ -44,8 +89,12 @@ class ConnectionTestThread(QThread):
         try:
             if self.device_type == 'aps_controller':
                 self._test_aps_connection()
-            elif self.device_type == 'keithley_2470':
+            elif self.device_type == 'keithley_smu':
                 self._test_keithley_connection()
+            elif self.device_type == 'nge103_psu':
+                self._test_nge103_connection()
+            elif self.device_type == 'keysight_oscilloscope':
+                self._test_oscilloscope_connection()
             else:
                 log.error(f"Unknown device type requested: {self.device_type}")
                 self.connection_result.emit(
@@ -87,32 +136,102 @@ class ConnectionTestThread(QThread):
             )
     
     def _test_keithley_connection(self):
-        """Test Keithley 2470 connection."""
+        """Test Keithley SMU connection."""
         resource = self.connection_params.get('resource', '')
-        log.info(f"Testing Keithley 2470 connection with resource: {resource}")
+        log.info(f"Testing Keithley SMU connection with resource: {resource}")
         if not resource:
             log.warning("Keithley connection test failed: No resource address provided")
             self.connection_result.emit(
-                "Keithley 2470", False, "No resource address"
+                "Keithley SMU", False, "No resource address"
             )
             return
         
         try:
             from pymeasure.instruments import keithley
-            log.debug(f"Creating Keithley2470 instance for resource: {resource}")
-            instrument = keithley.Keithley2470(resource)
+            log.debug(f"Creating KeithleySMU instance for resource: {resource}")
+            instrument = keithley.KeithleySMU(resource)
             # Try a simple query
             idn = instrument.id
-            log.info(f"Keithley 2470 successfully connected: {idn}")
+            log.info(f"Keithley SMU successfully connected: {idn}")
             instrument.disconnect()
-            log.debug(f"Keithley 2470 disconnected from {resource}")
+            log.debug(f"Keithley SMU disconnected from {resource}")
             self.connection_result.emit(
-                "Keithley 2470", True, f"Connected: {idn}"
+                "Keithley SMU", True, f"Connected: {idn}"
             )
         except Exception as e:
             log.error(f"Keithley connection test error on {resource}: {e}")
             self.connection_result.emit(
-                "Keithley 2470", False, "Connection error"
+                "Keithley SMU", False, "Connection error"
+            )
+    
+    def _test_nge103_connection(self):
+        """Test NGE103 power supply connection."""
+        resource = self.connection_params.get('connection', '')
+        log.info(f"Testing NGE103 PSU connection with resource: {resource}")
+        if not resource:
+            log.warning("NGE103 connection test failed: No resource address provided")
+            self.connection_result.emit(
+                "NGE103 PSU", False, "No resource address"
+            )
+            return
+        
+        try:
+            sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            from rs_nge103 import NGE100
+            log.debug(f"Creating NGE100 instance for resource: {resource}")
+            psu = NGE100(resource, channels=3)
+            if psu.connect():
+                idn = psu.ID()
+                log.info(f"NGE103 PSU successfully connected: {idn}")
+                psu.disconnect()
+                log.debug(f"NGE103 PSU disconnected from {resource}")
+                self.connection_result.emit(
+                    "NGE103 PSU", True, f"Connected: {idn}"
+                )
+            else:
+                log.warning(f"NGE103 PSU failed to connect on {resource}")
+                self.connection_result.emit(
+                    "NGE103 PSU", False, "Failed to connect"
+                )
+        except Exception as e:
+            log.error(f"NGE103 connection test error on {resource}: {e}")
+            self.connection_result.emit(
+                "NGE103 PSU", False, "Connection error"
+            )
+    
+    def _test_oscilloscope_connection(self):
+        """Test Keysight oscilloscope connection."""
+        resource = self.connection_params.get('connection', '')
+        log.info(f"Testing Keysight oscilloscope connection with resource: {resource}")
+        if not resource:
+            log.warning("Oscilloscope connection test failed: No resource address provided")
+            self.connection_result.emit(
+                "Keysight Oscilloscope", False, "No resource address"
+            )
+            return
+        
+        try:
+            sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            from keysight_dso_s import KeysightDSOS
+            log.debug(f"Creating KeysightDSOS instance for resource: {resource}")
+            scope = KeysightDSOS(resource)
+            if scope.connect():
+                idn = scope.query_id()
+                log.info(f"Keysight oscilloscope successfully connected: {idn}")
+                scope.disconnect()
+                log.debug(f"Keysight oscilloscope disconnected from {resource}")
+                self.connection_result.emit(
+                    "Keysight Oscilloscope", True, f"Connected: {idn}"
+                )
+            else:
+                log.warning(f"Keysight oscilloscope failed to connect on {resource}")
+                self.connection_result.emit(
+                    "Keysight Oscilloscope", False, "Failed to connect"
+                )
+        except Exception as e:
+            log.error(f"Oscilloscope connection test error on {resource}: {e}")
+            self.connection_result.emit(
+                "Keysight Oscilloscope", False, "Connection error"
             )
 
 
@@ -132,84 +251,63 @@ class HardwareConfigWidget(QGroupBox):
     def _setup_ui(self):
         layout = QVBoxLayout(self)
         
-        # Determine required hardware based on procedure
-        if self.procedure_class == HighPowerPulseTest:
-            self._add_aps_controller_config(layout)
-            self._add_keithley_config(layout)
-        elif self.procedure_class == RandomProcedure:
-            # Random procedure doesn't need hardware
+        # Get hardware configuration from procedure class
+        hardware_config = getattr(self.procedure_class, 'HARDWARE', {})
+        
+        if not hardware_config:
+            # No hardware needed
             info_label = QLabel("This procedure does not require hardware connections.")
             info_label.setStyleSheet("color: #666; font-style: italic;")
             layout.addWidget(info_label)
+        else:
+            # Create configuration sections for each hardware device
+            for device_type, device_info in hardware_config.items():
+                self._add_hardware_section(layout, device_type, device_info)
         
         layout.addStretch()
     
-    def _add_aps_controller_config(self, layout):
-        """Add APS controller configuration section."""
-        group = QGroupBox("APS Controller")
+    def _add_hardware_section(self, layout, device_type, device_info):
+        """Add a hardware configuration section based on device info."""
+        display_name = device_info.get('display_name', device_type)
+        parameters = device_info.get('parameters', {})
+        
+        group = QGroupBox(display_name)
         group_layout = QGridLayout(group)
         
-        # Port selection
-        group_layout.addWidget(QLabel("Serial Port:"), 0, 0)
-        port_edit = QLineEdit("COM3")
-        port_edit.setPlaceholderText("e.g., COM3, /dev/ttyUSB0")
-        group_layout.addWidget(port_edit, 0, 1)
+        row = 0
+        device_widgets = {}
         
-        # Test button
+        for param_name, param_config in parameters.items():
+            label = param_config.get('label', param_name)
+            default = param_config.get('default', '')
+            placeholder = param_config.get('placeholder', '')
+            
+            # Parameter label
+            group_layout.addWidget(QLabel(f"{label}:"), row, 0)
+            
+            # Parameter input
+            param_edit = QLineEdit(str(default))
+            param_edit.setPlaceholderText(placeholder)
+            group_layout.addWidget(param_edit, row, 1)
+            
+            device_widgets[param_name] = param_edit
+            row += 1
+        
+        # Test button (only show for first parameter row)
         test_btn = QPushButton("Test Connection")
-        test_btn.clicked.connect(lambda: self._test_connection('aps_controller'))
+        test_btn.clicked.connect(lambda: self._test_connection(device_type))
         group_layout.addWidget(test_btn, 0, 2)
         
-        # Status label - positioned next to test button
+        # Status label
         status_label = QLabel("Not tested")
         status_label.setStyleSheet("color: #666;")
-        status_label.setMinimumWidth(170) 
+        status_label.setMinimumWidth(170)
         group_layout.addWidget(status_label, 0, 3)
         
         # Store references
-        self.connection_widgets['aps_controller'] = {'port': port_edit}
-        self.status_labels['aps_controller'] = status_label
-        self.test_buttons['aps_controller'] = test_btn
-        
-        layout.addWidget(group)
-    
-    def _add_keithley_config(self, layout):
-        """Add Keithley 2470 configuration section."""
-        group = QGroupBox("Keithley 2470 SMU")
-        group_layout = QGridLayout(group)
-        
-        # Resource address
-        group_layout.addWidget(QLabel("VISA Resource:"), 0, 0)
-        resource_edit = QLineEdit("")
-        resource_edit.setPlaceholderText("e.g., TCPIP::192.168.1.100::INSTR")
-        group_layout.addWidget(resource_edit, 0, 1)
-        
-        # Test button
-        test_btn = QPushButton("Test Connection")
-        test_btn.clicked.connect(lambda: self._test_connection('keithley_2470'))
-        group_layout.addWidget(test_btn, 0, 2)
-        
-        # Status label - positioned next to test button
-        status_label = QLabel("Not tested")
-        status_label.setStyleSheet("color: #666;")
-        status_label.setMinimumWidth(170) 
-        group_layout.addWidget(status_label, 0, 3)
-        
-        # Measurement voltage
-        group_layout.addWidget(QLabel("Measurement Voltage (V):"), 1, 0)
-        voltage_spin = QDoubleSpinBox()
-        voltage_spin.setRange(0.0, 210.0)
-        voltage_spin.setValue(20.0)
-        voltage_spin.setSuffix(" V")
-        group_layout.addWidget(voltage_spin, 1, 1)
-        
-        # Store references
-        self.connection_widgets['keithley_2470'] = {
-            'resource': resource_edit,
-            'voltage': voltage_spin
-        }
-        self.status_labels['keithley_2470'] = status_label
-        self.test_buttons['keithley_2470'] = test_btn
+        self.connection_widgets[device_type] = device_widgets
+        self.status_labels[device_type] = status_label
+        self.test_buttons[device_type] = test_btn
         
         layout.addWidget(group)
     
@@ -217,16 +315,10 @@ class HardwareConfigWidget(QGroupBox):
         """Request connection test for specified device."""
         log.info(f"Connection test requested for device: {device_type}")
         widgets = self.connection_widgets.get(device_type, {})
-        params = {}
+        params = {key: widget.text() for key, widget in widgets.items()}
         
-        if device_type == 'aps_controller':
-            params['port'] = widgets['port'].text()
-            log.debug(f"APS controller test parameters: port={params['port']}")
-        elif device_type == 'keithley_2470':
-            params['resource'] = widgets['resource'].text()
-            params['voltage'] = widgets['voltage'].value()
-            log.debug(f"Keithley 2470 test parameters: resource={params['resource']}, voltage={params['voltage']}")
-        
+        log.debug(f"{device_type} test parameters: {params}")
+
         # Disable test button and show testing status
         self.test_buttons[device_type].setEnabled(False)
         self.status_labels[device_type].setText("Testing connection...")
@@ -242,8 +334,12 @@ class HardwareConfigWidget(QGroupBox):
         device_type = None
         if "APS" in device_name:
             device_type = 'aps_controller'
-        elif "Keithley" in device_name:
-            device_type = 'keithley_2470'
+        elif "Keithley" in device_name and "SMU" in device_name:
+            device_type = 'keithley_smu'
+        elif "NGE103" in device_name or "NGE" in device_name:
+            device_type = 'nge103_psu'
+        elif "Oscilloscope" in device_name or "Keysight" in device_name:
+            device_type = 'keysight_oscilloscope'
         
         if device_type and device_type in self.status_labels:
             label = self.status_labels[device_type]
@@ -289,7 +385,7 @@ class StartupDialog(QDialog):
         self.connection_parameters = {}
         self.connection_test_thread = None
         
-        self.setWindowTitle("ZE APS Measurement Setup")
+        self.setWindowTitle("ZE / APS Measurement Setup")
         self.setWindowIcon(QIcon('ZE.png'))
         self.setModal(True)
         self.resize(1024, 768)
@@ -320,8 +416,16 @@ class StartupDialog(QDialog):
         
         self.procedure_combo = QComboBox()
         self.procedure_combo.setMinimumHeight(30)
-        self.procedure_combo.addItem("Random Number Test", RandomProcedure)
-        self.procedure_combo.addItem("High Power Pulse Test (HPPT)", HighPowerPulseTest)
+        
+        # Discover and populate procedures
+        discovered_procedures = discover_procedures()
+        for procedure_class, display_name in discovered_procedures:
+            self.procedure_combo.addItem(display_name, procedure_class)
+        
+        if self.procedure_combo.count() == 0:
+            log.error("No procedures found! Adding a placeholder.")
+            self.procedure_combo.addItem("No procedures found", None)
+        
         self.procedure_combo.currentTextChanged.connect(self._on_procedure_changed)
         
         procedure_layout.addWidget(self.procedure_combo)
@@ -410,13 +514,8 @@ class StartupDialog(QDialog):
         
         log.info(f"Procedure changed to: {procedure_class.__name__}")
         self.selected_procedure = procedure_class
-        
-        # Update description
-        descriptions = {
-            RandomProcedure: "A simple test procedure that generates random numbers. No hardware required.",
-            HighPowerPulseTest: "High Power Pulse Test using APS controller and Keithley 2470 SMU for current measurements."
-        }
-        description = descriptions.get(procedure_class, "No description available.")
+
+        description = procedure_class.description if hasattr(procedure_class, 'description') else "No description available."
         self.description_label.setText(description)
         log.debug(f"Updated procedure description: {description}")
         
@@ -433,7 +532,8 @@ class StartupDialog(QDialog):
         self.hardware_layout.addWidget(self.hardware_widget)
         
         # Update button states
-        test_all_visible = procedure_class != RandomProcedure
+        hardware_config = getattr(procedure_class, 'HARDWARE', {})
+        test_all_visible = bool(hardware_config)  # Show if there's any hardware to test
         self.test_all_btn.setVisible(test_all_visible)
         log.debug(f"Test all button visibility set to: {test_all_visible}")
     

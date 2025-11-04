@@ -586,63 +586,65 @@ class APSController:
     # COSS (Output Capacitance) Test Commands
     # ===========================================
     
-    def coss_test(self, *args) -> bool:
+    def coss_test(self) -> bool:
         """
         Run COSS (Output Capacitance) test.
         
-        Args:
-            *args: Test parameters (implementation-specific)
-            
+        Note: The COSS test in the firmware appears to have no user-configurable parameters
+        via the test command. Parameters may need to be set separately if available.
+        
         Returns:
             True if test started successfully
         """
-        cmd = "COSS_test"
-        if args:
-            cmd += " " + " ".join(str(arg) for arg in args)
-        
-        response = self._send_command(cmd)
+        response = self._send_command("COSS_test")
         return response is not None
     
     # ===========================================
     # UIS (Unclamped Inductive Switching) Test Commands
     # ===========================================
     
-    def uis_test(self, *args) -> bool:
+    def uis_test(self, voltage_v: float, time_s: float) -> bool:
         """
         Run UIS (Unclamped Inductive Switching) test.
         
         Args:
-            *args: Test parameters (implementation-specific)
+            voltage_v: Charging voltage in Volts (max 200V)
+            time_s: Charging duration in seconds (can also be specified in microseconds)
             
         Returns:
             True if test started successfully
+            
+        Example:
+            uis_test(100.0, 50e-6)  # 100V, 50 microseconds
         """
-        cmd = "UIS_test"
-        if args:
-            cmd += " " + " ".join(str(arg) for arg in args)
-        
-        response = self._send_command(cmd)
-        return response is not None
+        return self._send_command(f"UIS_test {voltage_v}V {time_s}s") is not None
     
     # ===========================================
     # SCT (Short Circuit Test) Commands
     # ===========================================
     
-    def sct_test(self, *args) -> Optional[str]:
+    def sct_test(self, voltage_v: float, time_s: float, current_a: Optional[float] = None) -> Optional[str]:
         """
         Run SCT (Short Circuit Test).
         
         Args:
-            *args: Test parameters (implementation-specific)
+            voltage_v: Test voltage in Volts (max 2000V, or 200V for LV mode)
+            time_s: Short circuit duration in seconds
+            current_a: Optional test current in Amperes (positive for type 2, negative for type 3)
+                      If None, runs type 1 test
             
         Returns:
             Response string from controller, or None if error
+            
+        Examples:
+            sct_test(600.0, 10e-6)           # Type 1: 600V, 10us
+            sct_test(600.0, 10e-6, 50.0)     # Type 2: 600V, 10us, 50A
+            sct_test(600.0, 10e-6, -50.0)    # Type 3: 600V, 10us, -50A (inverted current)
         """
-        cmd = "SCT_test"
-        if args:
-            cmd += " " + " ".join(str(arg) for arg in args)
-        
-        return self._send_command(cmd)
+        if current_a is None:
+            return self._send_command(f"SCT_test {voltage_v}V {time_s}s")
+        else:
+            return self._send_command(f"SCT_test {voltage_v}V {time_s}s {current_a}A")
     
     def sct_parameter(self, parameter: str, value: Optional[float] = None) -> Union[bool, float]:
         """
@@ -671,21 +673,21 @@ class APSController:
     # CMTI (Common Mode Transient Immunity) Test Commands
     # ===========================================
     
-    def cmti_test(self, *args) -> bool:
+    def cmti_test(self, test_voltage_v: float, driver_voltage_v: float) -> bool:
         """
         Run CMTI (Common Mode Transient Immunity) test.
         
         Args:
-            *args: Test parameters (implementation-specific)
+            test_voltage_v: Test voltage in Volts (0V to 2000V)
+            driver_voltage_v: Driver voltage in Volts (0V to 200V)
             
         Returns:
             True if test started successfully
+            
+        Example:
+            cmti_test(1200.0, 15.0)  # 1200V test voltage, 15V driver voltage
         """
-        cmd = "CMTI_test"
-        if args:
-            cmd += " " + " ".join(str(arg) for arg in args)
-        
-        response = self._send_command(cmd)
+        response = self._send_command(f"CMTI_test {test_voltage_v}V {driver_voltage_v}V")
         return response is not None
     
     def cmti_parameter(self, parameter: str, value: Optional[float] = None) -> Union[bool, float]:
@@ -715,21 +717,22 @@ class APSController:
     # ZCS (Zero Current Switching) Test Commands
     # ===========================================
     
-    def zcs_test(self, *args) -> bool:
+    def zcs_test(self, input_voltage_v: float, output_voltage_v: float, cycles: int) -> bool:
         """
         Run ZCS (Zero Current Switching) test.
         
         Args:
-            *args: Test parameters (implementation-specific)
+            input_voltage_v: Input voltage in Volts (0V to 2000V)
+            output_voltage_v: Output voltage in Volts (0V to 200V)
+            cycles: Number of switching cycles to perform
             
         Returns:
             True if test started successfully
+            
+        Example:
+            zcs_test(800.0, 12.0, 1000)  # 800V input, 12V output, 1000 cycles
         """
-        cmd = "ZCS_test"
-        if args:
-            cmd += " " + " ".join(str(arg) for arg in args)
-        
-        response = self._send_command(cmd)
+        response = self._send_command(f"ZCS_test {input_voltage_v}V {output_voltage_v}V {cycles}")
         return response is not None
     
     def zcs_parameter(self, parameter: str, value: Optional[float] = None) -> Union[bool, float]:
@@ -759,22 +762,28 @@ class APSController:
     # HPPT (High Power Pulse Test) Commands
     # ===========================================
     
-    def hppt_test(self, *args) -> bool:
+    def hppt_test(self, voltage_v: float, on_time_ns: int, period_s: float, 
+                  pulse_count: int, measurement: bool = False) -> bool:
         """
         Run HPPT (High Power Pulse Test).
         
         Args:
-            *args: Test parameters (implementation-specific)
+            voltage_v: Test voltage in Volts (0V to 2000V)
+            on_time_ns: DUT on-time in nanoseconds (14ns to 3000ns, will be rounded to nearest 7ns)
+            period_s: Pulse repetition period in seconds (up to 1s)
+            pulse_count: Number of pulses to generate
+            measurement: If True, wait for gate current measurement after each burst (default: False)
             
         Returns:
             True if test started successfully
+            
+        Example:
+            hppt_test(1200.0, 100, 0.001, 1000)  # 1200V, 100ns pulses, 1ms period, 1000 pulses
+            hppt_test(800.0, 500, 0.0001, 5000, measurement=True)  # with measurement
         """
-        cmd = "HPPT_test"
-        if args:
-            cmd += " " + " ".join(str(arg) for arg in args)
-        
-        response = self._send_command(cmd)
-        return response
+        measurement_flag = 1 if measurement else 0
+        response = self._send_command(f"HPPT_test {voltage_v}V {on_time_ns}ns {period_s}s {pulse_count} {measurement_flag}")
+        return response is not None
     
     def hppt_parameter(self, parameter: str, value: Optional[float] = None) -> Union[bool, float]:
         """
@@ -803,59 +812,82 @@ class APSController:
     # CGD (Gate Charge) Test Commands
     # ===========================================
     
-    def cgd_test(self, *args) -> bool:
+    def cgd_test(self, voltage_v: float, pulse_width_s: float, 
+                 prebias_time_s: Optional[float] = None, mode: str = '+') -> bool:
         """
-        Run CGD (Gate Charge) test.
+        Run CGD (Gate-Drain Capacitance) test.
         
         Args:
-            *args: Test parameters (implementation-specific)
+            voltage_v: Drain voltage in Volts (max 200V)
+            pulse_width_s: Test pulse width in seconds
+            prebias_time_s: Optional pre-bias time in seconds (applies positive gate voltage before test)
+            mode: '+' for positive dV/dt or '-' for negative dV/dt (default: '+')
             
         Returns:
             True if test started successfully
+            
+        Examples:
+            cgd_test(100.0, 10e-6)                    # 100V, 10us pulse, positive dV/dt
+            cgd_test(100.0, 10e-6, mode='-')          # negative dV/dt
+            cgd_test(100.0, 10e-6, prebias_time_s=1e-3)  # with 1ms pre-bias
         """
-        cmd = "CGD_test"
-        if args:
-            cmd += " " + " ".join(str(arg) for arg in args)
+        cmd_parts = [f"{voltage_v}V", f"{pulse_width_s}s"]
+        if prebias_time_s is not None:
+            cmd_parts.append(f"{prebias_time_s}s")
+        if mode != '+':
+            cmd_parts.append(mode)
         
-        response = self._send_command(cmd)
+        response = self._send_command(f"CGD_test {' '.join(cmd_parts)}")
         return response is not None
     
     # ===========================================
     # CGG2 Test Commands
     # ===========================================
     
-    def cgg2a_test(self, *args) -> bool:
+    def cgg2a_test(self, mode: str, ramp_time_s: float, voltage_v: float) -> bool:
         """
-        Run CGG2A test.
+        Run CGG2A (Analog Gate-Gate Capacitance) test.
         
         Args:
-            *args: Test parameters (implementation-specific)
+            mode: 'RF' or 'RISING' for rise then fall, 'FR' or 'FALLING' for fall then rise
+            ramp_time_s: Ramp duration in seconds
+            voltage_v: Drain voltage in Volts (max 200V)
             
         Returns:
             True if test started successfully
+            
+        Examples:
+            cgg2a_test('RF', 10e-6, 100.0)      # Rising then falling, 10us ramps, 100V
+            cgg2a_test('RISING', 5e-6, 50.0)    # Same as 'RF'
         """
-        cmd = "CGG2A_test"
-        if args:
-            cmd += " " + " ".join(str(arg) for arg in args)
-        
-        response = self._send_command(cmd)
+        response = self._send_command(f"CGG2A_test {mode} {ramp_time_s}s {voltage_v}V")
         return response is not None
     
-    def cgg2d_test(self, *args) -> bool:
+    def cgg2d_test(self, mode: str, ramp_time_s: float, voltage_v: float, 
+                   hold_time_s: Optional[float] = None) -> bool:
         """
-        Run CGG2D test.
+        Run CGG2D (Digital Gate-Gate Capacitance) test.
         
         Args:
-            *args: Test parameters (implementation-specific)
+            mode: 'R' or 'RISING' for rising, 'F' or 'FALLING' for falling,
+                  'RF' or 'BOTH' for rise then fall, 'FR' for fall then rise
+            ramp_time_s: Ramp duration in seconds
+            voltage_v: Drain voltage in Volts (max 200V)
+            hold_time_s: Optional hold time between ramps (for RF/FR modes)
             
         Returns:
             True if test started successfully
+            
+        Examples:
+            cgg2d_test('R', 10e-6, 100.0)              # Rising ramp only
+            cgg2d_test('RF', 10e-6, 100.0, 1e-6)       # Rise-fall with 1us hold time
+            cgg2d_test('BOTH', 5e-6, 50.0, 500e-9)     # Same as 'RF'
         """
-        cmd = "CGG2D_test"
-        if args:
-            cmd += " " + " ".join(str(arg) for arg in args)
+        cmd_parts = [mode, f"{ramp_time_s}s", f"{voltage_v}V"]
+        if hold_time_s is not None:
+            cmd_parts.append(f"{hold_time_s}s")
         
-        response = self._send_command(cmd)
+        response = self._send_command(f"CGG2D_test {' '.join(cmd_parts)}")
         return response is not None
     
     # ===========================================
