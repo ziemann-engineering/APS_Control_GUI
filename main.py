@@ -161,6 +161,23 @@ class MainWindow(ManagedDockWindow):
             y_axis=y_axis
         )
 
+        # Set objectName for all QDockWidgets to avoid saveState warnings
+        try:
+            from PyQt5.QtWidgets import QDockWidget
+            for dock in self.findChildren(QDockWidget):
+                if not dock.objectName():
+                    # Use the window title as the object name, or a generic name
+                    title = dock.windowTitle()
+                    if title:
+                        # Clean the title to make it a valid object name
+                        obj_name = title.replace(' ', '_').replace(';', '')
+                        dock.setObjectName(obj_name)
+                    else:
+                        # Fallback to a generic name
+                        dock.setObjectName(f'DockWidget_{id(dock)}')
+        except Exception:
+            log.debug('Failed to set QDockWidget objectNames', exc_info=True)
+
         self.filename = f'{datetime.now():%Y-%m-%d_%H-%M-%S}' # self.procedure.filename   # Sets default filename
         self.store_measurement = True                             # Controls the 'Save data' toggle
         self.file_input.extensions = ["csv", "txt", "data"]         # Sets recognized extensions, first entry is the default extension

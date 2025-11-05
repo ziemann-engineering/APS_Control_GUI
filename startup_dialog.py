@@ -16,7 +16,7 @@ from pathlib import Path
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, 
     QPushButton, QComboBox, QLineEdit, QGroupBox,
-    QApplication, QFrame
+    QApplication, QFrame, QCheckBox
 )
 from PyQt5.QtCore import QThread, pyqtSignal, QTimer
 from PyQt5.QtGui import QFont, QIcon
@@ -246,6 +246,7 @@ class HardwareConfigWidget(QGroupBox):
         self.connection_widgets = {}
         self.status_labels = {}
         self.test_buttons = {}
+        self.enable_checkboxes = {}  # Store enable/disable checkboxes
         self._setup_ui()
     
     def _setup_ui(self):
@@ -277,39 +278,82 @@ class HardwareConfigWidget(QGroupBox):
         row = 0
         device_widgets = {}
         
+        # Add enable/disable checkbox on the first parameter row
+        enable_checkbox = QCheckBox("Enable")
+        enable_checkbox.setChecked(True)  # Enabled by default
+        enable_checkbox.stateChanged.connect(
+            lambda state: self._toggle_device_enabled(device_type, state)
+        )
+        self.enable_checkboxes[device_type] = enable_checkbox
+        
+        first_param = True
         for param_name, param_config in parameters.items():
             label = param_config.get('label', param_name)
             default = param_config.get('default', '')
             placeholder = param_config.get('placeholder', '')
             
+            col = 0
+            # Add Enable checkbox on first row
+            if first_param:
+                group_layout.addWidget(enable_checkbox, row, col)
+                col += 1
+            
             # Parameter label
-            group_layout.addWidget(QLabel(f"{label}:"), row, 0)
+            param_label = QLabel(f"{label}:")
+            group_layout.addWidget(param_label, row, col)
+            col += 1
             
             # Parameter input
             param_edit = QLineEdit(str(default))
             param_edit.setPlaceholderText(placeholder)
-            group_layout.addWidget(param_edit, row, 1)
+            group_layout.addWidget(param_edit, row, col)
+            col += 1
+            
+            # Test button and status on first row
+            if first_param:
+                test_btn = QPushButton("Test Connection")
+                test_btn.clicked.connect(lambda: self._test_connection(device_type))
+                group_layout.addWidget(test_btn, row, col)
+                col += 1
+                
+                status_label = QLabel("Not tested")
+                status_label.setStyleSheet("color: #666;")
+                status_label.setMinimumWidth(170)
+                group_layout.addWidget(status_label, row, col)
+                
+                self.test_buttons[device_type] = test_btn
+                self.status_labels[device_type] = status_label
+                first_param = False
             
             device_widgets[param_name] = param_edit
             row += 1
         
-        # Test button (only show for first parameter row)
-        test_btn = QPushButton("Test Connection")
-        test_btn.clicked.connect(lambda: self._test_connection(device_type))
-        group_layout.addWidget(test_btn, 0, 2)
-        
-        # Status label
-        status_label = QLabel("Not tested")
-        status_label.setStyleSheet("color: #666;")
-        status_label.setMinimumWidth(170)
-        group_layout.addWidget(status_label, 0, 3)
-        
         # Store references
         self.connection_widgets[device_type] = device_widgets
-        self.status_labels[device_type] = status_label
-        self.test_buttons[device_type] = test_btn
         
         layout.addWidget(group)
+    
+    def _toggle_device_enabled(self, device_type, state):
+        """Enable or disable all widgets for a specific device."""
+        enabled = (state == 2)  # Qt.Checked == 2
+        
+        # Enable/disable all parameter inputs
+        if device_type in self.connection_widgets:
+            for widget in self.connection_widgets[device_type].values():
+                widget.setEnabled(enabled)
+        
+        # Enable/disable test button
+        if device_type in self.test_buttons:
+            self.test_buttons[device_type].setEnabled(enabled)
+        
+        # Update status label
+        if device_type in self.status_labels:
+            if not enabled:
+                self.status_labels[device_type].setText("Disabled")
+                self.status_labels[device_type].setStyleSheet("color: #999;")
+            else:
+                self.status_labels[device_type].setText("Not tested")
+                self.status_labels[device_type].setStyleSheet("color: #666;")
     
     def _test_connection(self, device_type):
         """Request connection test for specified device."""
@@ -360,10 +404,16 @@ class HardwareConfigWidget(QGroupBox):
             log.warning(f"Could not find device type for status update: {device_name}")
     
     def get_connection_parameters(self):
-        """Get all connection parameters for this procedure."""
+        """Get all connection parameters for this procedure (only for enabled devices)."""
         params = {}
         
         for device_type, widgets in self.connection_widgets.items():
+            # Check if device is enabled
+            if device_type in self.enable_checkboxes:
+                if not self.enable_checkboxes[device_type].isChecked():
+                    # Device is disabled, skip it
+                    continue
+            
             device_params = {}
             for param_name, widget in widgets.items():
                 if hasattr(widget, 'text'):
@@ -402,11 +452,11 @@ class StartupDialog(QDialog):
     
     def _setup_ui(self):
         """Setup the user interface."""
-        layout = QVBoxLayout(self)
+        self.main_layout = QVBoxLayout(self)
         
         # Header
         header = self._create_header()
-        layout.addWidget(header)
+        self.main_layout.addWidget(header)
         
         # Procedure selection
         procedure_group = QGroupBox("Select Measurement Procedure")
@@ -437,21 +487,17 @@ class StartupDialog(QDialog):
         self.description_label.setStyleSheet("color: #666; margin: 10px 0; padding: 5px;")
         procedure_layout.addWidget(self.description_label)
         
-        layout.addWidget(procedure_group)
+        self.main_layout.addWidget(procedure_group)
         
         # Add spacing between sections
-        layout.addSpacing(10)
+        self.main_layout.addSpacing(10)
         
         # Hardware configuration (will be populated based on procedure)
         self.hardware_widget = None
-        self.hardware_container = QFrame()
-        self.hardware_container.setMinimumHeight(400)  # Ensure enough space for hardware config
-        self.hardware_layout = QVBoxLayout(self.hardware_container)
-        self.hardware_layout.setSpacing(10)
-        layout.addWidget(self.hardware_container)
+        self.hardware_widget_index = self.main_layout.count()  # Remember position for replacement
         
         # Add some spacing before buttons
-        layout.addSpacing(10)
+        self.main_layout.addSpacing(10)
         
         # Buttons
         button_layout = QHBoxLayout()
@@ -471,9 +517,9 @@ class StartupDialog(QDialog):
         self.start_btn.setMinimumWidth(150)
         button_layout.addWidget(self.start_btn)
         
-        layout.addWidget(QFrame())  # Spacer
-        layout.addLayout(button_layout)
-        layout.setContentsMargins(10, 10, 10, 10)
+        self.main_layout.addWidget(QFrame())  # Spacer
+        self.main_layout.addLayout(button_layout)
+        self.main_layout.setContentsMargins(10, 10, 10, 10)
         
         # Initialize with first procedure
         self._on_procedure_changed()
@@ -522,14 +568,14 @@ class StartupDialog(QDialog):
         # Remove existing hardware widget
         if self.hardware_widget:
             log.debug("Removing existing hardware configuration widget")
-            self.hardware_layout.removeWidget(self.hardware_widget)
+            self.main_layout.removeWidget(self.hardware_widget)
             self.hardware_widget.deleteLater()
         
         # Create new hardware configuration widget
         log.debug(f"Creating hardware configuration widget for {procedure_class.__name__}")
         self.hardware_widget = HardwareConfigWidget(procedure_class)
         self.hardware_widget.test_requested.connect(self._handle_test_request)
-        self.hardware_layout.addWidget(self.hardware_widget)
+        self.main_layout.insertWidget(self.hardware_widget_index, self.hardware_widget)
         
         # Update button states
         hardware_config = getattr(procedure_class, 'HARDWARE', {})

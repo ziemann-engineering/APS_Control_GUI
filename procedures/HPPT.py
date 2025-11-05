@@ -58,7 +58,7 @@ class HighPowerPulseTest(Procedure):
     wait_for_completion = BooleanParameter('Wait for test completion', default=True)
     timeout = FloatParameter('Test timeout', units='s', default=300.0)
 
-    DATA_COLUMNS = ['Timestamp', 'Event Type', 'Message', 'Current (A)', 'Burst Count']
+    DATA_COLUMNS = ['Timestamp', 'Burst', 'Current (A)', 'Voltage (V)']
     
     # GUI Configuration
     INPUTS = [
@@ -83,7 +83,7 @@ class HighPowerPulseTest(Procedure):
     DISPLAYS = INPUTS  # Display same parameters as inputs
     
     X_AXIS = 'Timestamp'
-    Y_AXIS = ['Current (A)', 'Burst Count']
+    Y_AXIS = ['Current (A)', 'Burst']
     
     # Hardware Configuration for Startup Dialog
     HARDWARE = {
@@ -190,42 +190,45 @@ class HighPowerPulseTest(Procedure):
     def execute(self):
         """Execute HPPT test on APS controller with message monitoring.
 
-        Monitors APS messages for 'burst n' and 'recharging' events.
-        When 'recharging' is received, performs current measurement with Keithley.
+        Test sequence:
+        1. Get initial SMU current measurement (Burst 0)
+        2. Send HPPT_test command
+        3. Send start
+        4. Each time "recharging" is received, start another current measurement
+        5. When measurement done, send "Ig measurement done"
+        6. Repeat 4+5 until "measurement complete" is received
         """
         if self.aps is None:
-            log.warning('No APS controller available for HPPT test')
-            self.emit('results', {
-                'Timestamp': time.time(),
-                'Event Type': 'Error',
-                'Message': 'No APS controller available',
-                'Current (A)': float('nan'),
-                'Burst Count': self.burst_count
-            })
+            log.error('No APS controller available for HPPT test')
             return
 
         try:
             # Check system safety before starting test
             if not self.aps.is_safe():
                 log.error('APS system safety check failed')
-                self.emit('results', {
-                    'Timestamp': time.time(),
-                    'Event Type': 'Safety Error',
-                    'Message': 'APS system is not in safe state',
-                    'Current (A)': float('nan'),
-                    'Burst Count': self.burst_count
-                })
                 return
 
             log.info('Starting HPPT test...')
             log.info(f'Test parameters: Voltage={self.test_voltage}V, On-time={self.dut_on_time}ns, '
                     f'Period={self.pulse_period}ms, Pulses={self.pulse_count}, '
                     f'Gate measurement={self.gate_measurement}')
+
+            self.timeout = self.pulse_period * self.pulse_count / 1000.0 + 30.0  # Estimate timeout based on test duration + 30s buffer
+
+            # Step 1: Get initial SMU current measurement (Burst 0)
+            log.info('Step 1: Getting initial SMU current measurement (Burst 0)')
+            initial_current = self._measure_current_with_keithley()
+            self.emit('results', {
+                'Timestamp': time.time(),
+                'Burst': 0,
+                'Current (A)': initial_current,
+                'Voltage (V)': self.measurement_voltage
+            })
             
-            # Convert pulse_period from ms to seconds for the command
+            # Step 2: Send HPPT_test command
+            log.info('Step 2: Sending HPPT_test command')
             period_s = self.pulse_period / 1000.0
             
-            # Start HPPT test with all required parameters
             start_response = self.aps.hppt_test(
                 voltage_v=self.test_voltage,
                 on_time_ns=self.dut_on_time,
@@ -236,69 +239,45 @@ class HighPowerPulseTest(Procedure):
             log.info(f'HPPT test command response: {start_response}')
             
             if not start_response:
-                log.error('Failed to start HPPT test')
-                self.emit('results', {
-                    'Timestamp': time.time(),
-                    'Event Type': 'Start Failed',
-                    'Message': 'Failed to start HPPT test',
-                    'Current (A)': float('nan'),
-                    'Burst Count': self.burst_count
-                })
+                log.error('Failed to send HPPT test command')
                 return
 
-            # Emit test start event
-            self.emit('results', {
-                'Timestamp': time.time(),
-                'Event Type': 'Test Started',
-                'Message': f'HPPT test: {self.test_voltage}V, {self.dut_on_time}ns, {self.pulse_count} pulses',
-                'Current (A)': float('nan'),
-                'Burst Count': self.burst_count
-            })
+            # Step 3: Send start command
+            log.info('Step 3: Sending start command')
+            self.aps.start()
+            log.info(f'HPPT test started: {self.test_voltage}V, {self.dut_on_time}ns, {self.pulse_count} pulses')
 
-            # Monitor messages from APS controller
-            log.info('Monitoring APS controller messages...')
+            # Monitor messages from APS controller (Steps 4-6)
+            log.info('Steps 4-6: Monitoring APS controller messages...')
             self._monitor_aps_messages()
 
         except Exception as e:
             log.exception('Error during HPPT test execution: %s', e)
-            self.emit('results', {
-                'Timestamp': time.time(),
-                'Event Type': 'Exception',
-                'Message': f'Error during HPPT test: {str(e)}',
-                'Current (A)': float('nan'),
-                'Burst Count': self.burst_count
-            })
 
     def _monitor_aps_messages(self):
-        """Monitor APS controller messages for burst and recharging events.
+        """Monitor APS controller messages for burst, recharging, and measurement complete events.
         
         This method continuously monitors the APS serial communication for:
         - 'burst n' messages (logged)
         - 'recharging' messages (triggers current measurement)
+        - 'measurement complete' messages (stops monitoring)
+        
+        Note: Cannot use get_status() during test - must rely on received messages only.
         """
         start_time = time.time()
+        measurement_complete = False
         
-        while time.time() - start_time < self.timeout:
+        while time.time() - start_time < self.timeout and not measurement_complete:
             try:
-                # Check if test is still running
-                status = self.aps.get_status()
-                if not status.test_running:
-                    log.info('HPPT test completed')
-                    self.emit('results', {
-                        'Timestamp': time.time(),
-                        'Event Type': 'Test Completed',
-                        'Message': 'HPPT test completed normally',
-                        'Current (A)': float('nan'),
-                        'Burst Count': self.burst_count
-                    })
-                    break
-
                 # Read any available messages from APS controller
-                # This is a custom method we'll need to implement to monitor raw serial data
                 messages = self._read_aps_messages()
                 
                 for message in messages:
-                    self._process_aps_message(message)
+                    # Check if measurement complete was received
+                    if self._process_aps_message(message):
+                        measurement_complete = True
+                        log.info('HPPT test completed - measurement complete received')
+                        break
                 
                 # Small delay to prevent excessive CPU usage
                 time.sleep(0.01)
@@ -308,15 +287,8 @@ class HighPowerPulseTest(Procedure):
                 time.sleep(0.1)
         
         # Timeout occurred
-        if time.time() - start_time >= self.timeout:
+        if time.time() - start_time >= self.timeout and not measurement_complete:
             log.warning(f'HPPT monitoring timed out after {self.timeout}s')
-            self.emit('results', {
-                'Timestamp': time.time(),
-                'Event Type': 'Timeout',
-                'Message': f'HPPT monitoring timed out after {self.timeout}s',
-                'Current (A)': float('nan'),
-                'Burst Count': self.burst_count
-            })
 
     def _read_aps_messages(self):
         """Read available messages from APS controller serial buffer.
@@ -350,8 +322,16 @@ class HighPowerPulseTest(Procedure):
         
         Args:
             message: Message string from APS controller
+            
+        Returns:
+            True if "measurement complete" was received, False otherwise
         """
         log.info(f'APS Message: {message}')
+        
+        # Check for measurement complete
+        if 'measurement complete' in message.lower():
+            log.info('Measurement complete received - test finished')
+            return True
         
         # Check for burst messages
         burst_match = re.match(r'burst\s+(\d+)', message, re.IGNORECASE)
@@ -359,39 +339,38 @@ class HighPowerPulseTest(Procedure):
             burst_number = int(burst_match.group(1))
             self.burst_count += 1  # Increment total burst count
             log.info(f'Detected burst {burst_number} (total: {self.burst_count})')
-            
-            self.emit('results', {
-                'Timestamp': time.time(),
-                'Event Type': 'Burst',
-                'Message': f'burst {burst_number}',
-                'Current (A)': float('nan'),
-                'Burst Count': self.burst_count
-            })
-            return
+            return False
 
         # Check for recharging message
         if 'recharging' in message.lower():
             log.info('Detected recharging event - performing current measurement')
             
+            # Measure current
             current = self._measure_current_with_keithley()
             
+            # Emit measurement data only
             self.emit('results', {
                 'Timestamp': time.time(),
-                'Event Type': 'Recharging',
-                'Message': message,
+                'Burst': self.burst_count,
                 'Current (A)': current,
-                'Burst Count': self.burst_count
+                'Voltage (V)': self.measurement_voltage
             })
-            return
+            
+            # Send "Ig measurement done" message to APS controller
+            log.info('Sending "Ig measurement done" to APS controller')
+            try:
+                if self.aps and self.aps.serial_conn:
+                    self.aps.serial_conn.write(b'Ig measurement done\n')
+                    self.aps.serial_conn.flush()
+                    log.info('Sent "Ig measurement done" message')
+            except Exception as e:
+                log.error(f'Error sending "Ig measurement done": {e}')
+            
+            return False
 
-        # Log other messages
-        self.emit('results', {
-            'Timestamp': time.time(),
-            'Event Type': 'Message',
-            'Message': message,
-            'Current (A)': float('nan'),
-            'Burst Count': self.burst_count
-        })
+        # Log other messages (no emit)
+        log.debug(f'Other APS message: {message}')
+        return False
 
     def _measure_current_with_keithley(self):
         """Perform current measurement with Keithley SMU.

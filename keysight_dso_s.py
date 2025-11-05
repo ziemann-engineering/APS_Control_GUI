@@ -178,6 +178,20 @@ class KeysightDSOSController:
             if errors:
                 print(f"  Errors detected: {errors}")
     
+    def set_channel_invert(self, channel: int, invert: bool = True):
+        """
+        Enable or disable channel inversion.
+        
+        Args:
+            channel: Channel number (1-4)
+            invert: True to invert the channel, False for normal polarity
+        """
+        if not self.scope:
+            raise RuntimeError("Not connected to oscilloscope")
+        
+        print(f"Channel {channel} invert: {'ON' if invert else 'OFF'}")
+        self.scope.write(f':CHANnel{channel}:INVert {"ON" if invert else "OFF"}')
+    
     def setup_timebase(self, scale: float = 1e-3, offset: float = 0.0):
         """
         Configure timebase settings.
