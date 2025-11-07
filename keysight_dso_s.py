@@ -31,7 +31,7 @@ Usage:
     scope.set_bandwidth_limit(1, '200MHZ')
     
     # Save settings
-    scope.save_settings('my_settings.stp')
+    scope.save_settings('my_settings.set')
     
     # Capture screenshot
     scope.capture_screenshot('scope_display.png')
@@ -52,16 +52,18 @@ from scipy.io import savemat  # type: ignore
 class KeysightDSOSController:
     """Controller for Keysight DSO-S series oscilloscopes."""
     
-    def __init__(self, resource_string: str):
+    def __init__(self, resource_string: str, auto_check_errors: bool = True):
         """
         Initialize oscilloscope connection.
         
         Args:
             resource_string: VISA resource string (e.g., 'USB0::0x2A8D::0x900E::MY12345678::INSTR')
+            auto_check_errors: If True, automatically check for errors after each command
         """
         self.resource_string = resource_string
         self.scope: Optional[pyvisa.Resource] = None
         self.rm = pyvisa.ResourceManager()
+        self.auto_check_errors = auto_check_errors
         
     def connect(self) -> bool:
         """Connect to the oscilloscope."""
@@ -70,7 +72,7 @@ class KeysightDSOSController:
             self.scope.timeout = 10000  # 10 second timeout
             
             # Test connection
-            idn = self.scope.query('*IDN?').strip()
+            idn = self._query('*IDN?').strip()
             print(f"Connected to: {idn}")
             return True
             
@@ -98,15 +100,71 @@ class KeysightDSOSController:
         errors = []
         try:
             # Read all errors from the queue
-            for _ in range(10):  # Max 10 errors to prevent infinite loop
-                error = self.scope.query(':SYST:ERR?').strip()
-                if error.startswith('+0,') or error.startswith('0,'):
+            for _ in range(30):  # Max 30 errors
+                error = self.scope.query(':SYST:ERR? STRing').strip()
+                if error == '0,"No error"':
                     break  # No more errors
-                errors.append(error)
+                errors.append(error) 
         except Exception as e:
             errors.append(f"Error reading error queue: {e}")
         
+        # Clear error queue
+        self.scope.write('*CLS')
         return errors
+    
+    def set_auto_check_errors(self, enabled: bool):
+        """
+        Enable or disable automatic error checking after each command.
+        
+        Args:
+            enabled: True to enable automatic error checking, False to disable
+        """
+        self.auto_check_errors = enabled
+        print(f"Automatic error checking: {'enabled' if enabled else 'disabled'}")
+    
+    def _write(self, command: str, check_errors: bool = None):
+        """
+        Write a command to the scope with optional error checking.
+        
+        Args:
+            command: SCPI command to write
+            check_errors: Override auto_check_errors flag for this command
+        """
+        if not self.scope:
+            raise RuntimeError("Not connected to oscilloscope")
+        
+        self.scope.write(command)
+        
+        # Check errors if requested (use instance flag if not overridden)
+        should_check = check_errors if check_errors is not None else self.auto_check_errors
+        if should_check:
+            errors = self.check_errors()
+            if errors:
+                print(f"Errors after '{command}': {errors}")
+        
+    def _query(self, command: str, check_errors: bool = None) -> str:
+        """
+        Send a query command and optionally perform error checking.
+
+        Args:
+            command: SCPI query string (e.g. '*IDN?')
+            check_errors: Override auto_check_errors flag for this query
+
+        Returns:
+            The raw response string from the instrument (not stripped)
+        """
+        if not self.scope:
+            raise RuntimeError("Not connected to oscilloscope")
+
+        result = self.scope.query(command)
+
+        should_check = check_errors if check_errors is not None else self.auto_check_errors
+        if should_check:
+            errors = self.check_errors()
+            if errors:
+                print(f"Errors after query '{command}': {errors}")
+
+        return result
     
     def reset(self):
         """Reset oscilloscope to default state."""
@@ -117,6 +175,34 @@ class KeysightDSOSController:
         self.scope.write('*RST')
         self.scope.write('*CLS')
         time.sleep(2)  # Wait for reset to complete
+    
+    def set_working_directory(self, path: str) -> bool:
+        """
+        Set the oscilloscope's current working directory for file operations.
+        
+        Args:
+            path: Directory path (e.g., 'C:\\Users\\Administrator\\Desktop\\GUI_test\\')
+            
+        Returns:
+            True if successful
+            
+        Note:
+            Uses :DISK:CDIR command (PDF page 481)
+            This affects where save_settings, capture_screenshot, and save_waveform_data store files
+        """
+        if not self.scope:
+            raise RuntimeError("Not connected to oscilloscope")
+        
+        try:
+            self._write(f':DISK:CDIR "{path}"', check_errors=True)
+            print(f"Working directory set to: {path}")
+            
+            return True
+            
+        except Exception as e:
+            print(f"Error setting working directory: {e}")
+            return False
+    
     
     def setup_channel(self, channel: int, enabled: bool = True, scale: float = 1.0, 
                      offset: float = 0.0, coupling: str = 'DC', impedance: str = '1MEG'):
@@ -136,20 +222,22 @@ class KeysightDSOSController:
         
         print(f"Configuring Channel {channel}:")
         print(f"  Enabled: {enabled}")
-        print(f"  Scale: {scale} V/div")
-        print(f"  Offset: {offset} V")
+        print(f"  Scale: {scale} /div")
+        print(f"  Offset: {offset}")
         print(f"  Coupling: {coupling}")
         print(f"  Impedance: {impedance}")
         
         # Enable/disable channel
-        self.scope.write(f':CHAN{channel}:DISP {"ON" if enabled else "OFF"}')
+        self._write(f':CHANnel{channel}:DISPlay {"ON" if enabled else "OFF"}')
         
         if enabled:
             # Set vertical scale
-            self.scope.write(f':CHANnel{channel}:SCALe {scale}')
-
+            self._write(f':CHANnel{channel}:SCALe {scale}')
+            print(f':CHANnel{channel}:SCALe {scale}')
+            time.sleep(0.1)
             # Set vertical offset
-            self.scope.write(f':CHANnel{channel}:OFFSet {offset}')
+            self._write(f':CHANnel{channel}:OFFSet {offset}')
+            print(f':CHANnel{channel}:OFFSet {offset}')
 
             # Configure input coupling + impedance using the combined INPUT command
             # PDF reference: :CHANnel<N>:INPut {DC | DC50 | AC | LFR1 | LFR2}
@@ -158,7 +246,7 @@ class KeysightDSOSController:
 
             # Map common user inputs to documented tokens
             if coup == 'DC':
-                if imp in ('50', 'FIFT', 'DC50', 'DCFIFT'):
+                if imp in ('50', 'FIFT', 'DC50', 'DCFIFT', 'DCFIFTY'):
                     input_token = 'DC50'  # DC coupling, 50 Ohm
                 else:
                     input_token = 'DC'   # DC coupling, 1 MOhm (default)
@@ -169,14 +257,8 @@ class KeysightDSOSController:
                 # Fallback to DC if unknown
                 input_token = coup
 
-            # Send the combined input command
-            self.scope.write(f':CHANnel{channel}:INPut {input_token}')
-
-            # If a probe-specific coupling adapter should be set, user can use PROBe:COUPling
-            # (not set here by default). Check for errors after configuration.
-            errors = self.check_errors()
-            if errors:
-                print(f"  Errors detected: {errors}")
+            # Send the combined input command - use consistent short form
+            self._write(f':CHAN{channel}:INP {input_token}')
     
     def set_channel_invert(self, channel: int, invert: bool = True):
         """
@@ -191,6 +273,39 @@ class KeysightDSOSController:
         
         print(f"Channel {channel} invert: {'ON' if invert else 'OFF'}")
         self.scope.write(f':CHANnel{channel}:INVert {"ON" if invert else "OFF"}')
+
+    def set_channel_label(self, channel: int, label: str) -> bool:
+        """
+        Set a textual label for a channel.
+
+        Args:
+            channel: Channel number (1-4)
+            label: Label text (maximum 16 characters). Double-quotes will be replaced with single quotes.
+
+        """
+        if not self.scope:
+            raise RuntimeError("Not connected to oscilloscope")
+
+        if not (1 <= channel <= 4):
+            raise ValueError("channel must be between 1 and 4")
+
+        if label is None:
+            label = ''
+        label_str = str(label)
+        # Replace double quotes inside label to avoid breaking SCPI string
+        if '"' in label_str:
+            label_str = label_str.replace('"', "'")
+
+        # Truncate to 16 characters
+        if len(label_str) > 16:
+            print(f"Channel label too long ({len(label_str)} chars); truncating to 16 chars")
+            label_str = label_str[:16]
+
+        cmd = f':CHANnel{channel}:LABel "{label_str}"'
+        # Send the label command (respects auto_check_errors via _write)
+        self._write(cmd)
+        self._write('DISPlay:LABel ON')
+        return True
     
     def setup_timebase(self, scale: float = 1e-3, offset: float = 0.0):
         """
@@ -230,19 +345,97 @@ class KeysightDSOSController:
         print(f"  Slope: {slope}")
         print(f"  Mode: {mode}")
         
-        # Set trigger mode
+        # Set trigger mode first
         self.scope.write(f':TRIG:MODE {mode}')
         
         # Set trigger source
         self.scope.write(f':TRIG:{mode}:SOUR {source}')
-        
-        # Set trigger level
-        self.scope.write(f':TRIG:{mode}:LEV {level}')
+
+        # Set trigger level - must be done after source is set
+        self.scope.write(f':TRIG:LEV {source},{level}')
+        print(f':TRIG:LEV {source},{level}')
         
         # Set trigger slope (for edge trigger)
         if mode == 'EDGE':
             self.scope.write(f':TRIG:{mode}:SLOP {slope}')
     
+    def get_trigger_level(self, mode: str = 'EDGE') -> Optional[float]:
+        """
+        Query the current trigger level.
+        
+        Args:
+            mode: Trigger mode ('EDGE', 'PULS', 'SLOP', 'VID')
+            
+        Returns:
+            Current trigger level in V, or None if error
+        """
+        if not self.scope:
+            raise RuntimeError("Not connected to oscilloscope")
+        
+        try:
+            result = self._query(f':TRIG:{mode}:LEV?').strip()
+            return float(result)
+        except Exception as e:
+            print(f"Error reading trigger level: {e}")
+            return None
+
+    def set_trigger_sweep(self, mode: str = 'AUTO', check_errors: bool = None) -> bool:
+        """
+        Set trigger sweep mode.
+
+        Args:
+            mode: 'AUTO' or 'TRIGgered' (various synonyms accepted: 'TRIG', 'TRIGGER', 'TRIGGERED')
+            check_errors: Optional override for automatic error checking
+
+        Returns:
+            True if the command was sent successfully, False on error
+        """
+        if not self.scope:
+            raise RuntimeError("Not connected to oscilloscope")
+
+        try:
+            m = (mode or 'AUTO').strip().upper()
+            # Accept common synonyms and map to the SCPI token expected
+            if m in ('AUTO', 'A'):
+                token = 'AUTO'
+            elif m in ('TRIG', 'TRIGGER', 'TRIGGERED', 'TRIGGERED'.upper(), 'T'):
+                # Keysight manual uses TRIGgered spelling; SCPI is generally case-insensitive
+                token = 'TRIGgered'
+            else:
+                # Default to AUTO if unknown
+                print(f"Unknown trigger sweep mode '{mode}', defaulting to AUTO")
+                token = 'AUTO'
+
+            cmd = f':TRIGger:SWEep {token}'
+            self._write(cmd, check_errors=check_errors)
+            print(f"Trigger sweep set to: {token}")
+            return True
+
+        except Exception as e:
+            print(f"Error setting trigger sweep mode: {e}")
+            return False
+
+    def force_trigger(self) -> bool:
+        """
+        Force a trigger event (equivalent to pressing the front-panel Force button).
+
+        Args:
+            check_errors: Optional override for automatic error checking
+
+        Returns:
+            True if the command was issued, False on error
+        """
+        if not self.scope:
+            raise RuntimeError("Not connected to oscilloscope")
+
+        try:
+            self._write(':TRIGger:FORCe')
+            print("Trigger forced")
+            return True
+        except Exception as e:
+            print(f"Error forcing trigger: {e}")
+            return False
+
     def set_acquisition_mode(self, mode: str = 'NORM', averages: int = 1):
         """
         Set acquisition mode.
@@ -260,10 +453,10 @@ class KeysightDSOSController:
         if mode == 'AVER':
             print(f"Setting averages: {averages}")
             self.scope.write(f':ACQ:COUN {averages}')
-    
+
     def single_acquisition(self) -> bool:
         """
-        Perform a single acquisition.
+        Configures single acquisition mode.
         
         Returns:
             True if acquisition completed successfully
@@ -271,52 +464,94 @@ class KeysightDSOSController:
         if not self.scope:
             raise RuntimeError("Not connected to oscilloscope")
         
-        print("Starting single acquisition...")
-        self.scope.write(':SING')
-        
-        # Wait for acquisition to complete
-        timeout = 10  # seconds
-        start_time = time.time()
-        
-        while time.time() - start_time < timeout:
-            status = self.scope.query(':OPER:COND?').strip()
-            # Check if bit 3 (run state) is 0
-            if int(status) & 0x08 == 0:
-                print("Acquisition completed")
-                return True
-            time.sleep(0.1)
-        
-        print("Acquisition timeout")
-        return False
-    
-    def get_waveform_data(self, channel: int):
+        self.scope.write(':SINGle')
+
+    def wait_for_acquisition(self, timeout: float = -1) -> bool:
         """
-        Get waveform data from specified channel (ASCII format).
+        Wait for the acquisition to complete.
+
+        Args:
+            timeout: Maximum time to wait in seconds. If -1, wait indefinitely.
+
+        Returns:
+            True if acquisition completed successfully, False on timeout.
+        """
+        if not self.scope:
+            raise RuntimeError("Not connected to oscilloscope")
+
+        # Interpret negative timeout as indefinite wait
+        if timeout is None or timeout < 0:
+            end_time = None
+        else:
+            end_time = time.time() + float(timeout)
+
+        # Poll the operation condition register until acquisition completes
+        try:
+            while True:
+                status = self._query(':OPER:COND?').strip()
+                # Check if bit 3 (run state) is 0 -> acquisition finished
+                try:
+                    if int(status) & 0x08 == 0:
+                        print("Acquisition completed")
+                        return True
+                except ValueError:
+                    # Unexpected response; treat as non-finished and continue
+                    pass
+
+                # If an end_time was set, check for timeout
+                if end_time is not None and time.time() >= end_time:
+                    print("Acquisition timeout")
+                    return False
+
+                time.sleep(0.1)
+        except Exception as e:
+            print(f"Error while waiting for acquisition: {e}")
+            return False
+    
+    def get_waveform_data(self, channel: int, data_format: str = 'WORD'):
+        """
+        Get waveform data from specified channel (binary format).
         
         Args:
             channel: Channel number (1-4)
+            data_format: 'WORD' (16-bit) or 'BYTE' (8-bit) - default 'WORD'
             
         Returns:
-            Tuple of (time_data, voltage_data) or None if error
+            Tuple of (time_data, voltage_data) as numpy arrays, or None if error
         
         Note:
             Uses :WAVeform:DATA? command (PDF page 1593)
             Uses :WAVeform:SOURce to specify channel
             Uses :WAVeform:PREamble? for scaling information
-            Format set to ASCII (ASC) for readability
+            WORD format (16-bit) is faster and more accurate
+            BYTE format (8-bit) uses less bandwidth but lower resolution
         """
         if not self.scope:
             raise RuntimeError("Not connected to oscilloscope")
         
         try:
+            # Validate format
+            fmt = data_format.upper()
+            if fmt not in ['WORD', 'BYTE']:
+                print(f"Invalid format '{data_format}', using WORD")
+                fmt = 'WORD'
+            
+            # Determine numpy dtype based on format
+            if fmt == 'WORD':
+                dtype = np.int16
+            else:  # BYTE
+                dtype = np.int8
+            
             # Set data source (PDF page 1630)
             self.scope.write(f':WAV:SOUR CHAN{channel}')
-            
-            # Set waveform format to ASCII
-            self.scope.write(':WAV:FORM ASC')
+
+            # Set waveform format
+            self.scope.write(f':WAV:FORM {fmt}')
+            if fmt == 'WORD':
+                self.scope.write(':WAV:BYTeorder LSBFirst')
             
             # Get waveform preamble for scaling (PDF page 1621)
-            preamble = self.scope.query(':WAV:PRE?').strip().split(',')
+            preamble = self._query(':WAV:PRE?').strip().split(',')
             # Preamble format: format,type,points,count,xinc,xorg,xref,yinc,yorg,yref
             y_increment = float(preamble[7])  # Y increment (voltage per count)
             y_origin = float(preamble[8])     # Y origin (voltage at reference)
@@ -325,30 +560,51 @@ class KeysightDSOSController:
             x_origin = float(preamble[5])     # X origin (time at first point)
             x_reference = float(preamble[6])  # X reference (point number of trigger)
             
-            # Get waveform data (PDF page 1593)
-            data_str = self.scope.query(':WAV:DATA?').strip()
+            # Get waveform data as binary (PDF page 1593)
+            self.scope.write(':WAV:DATA?')
+            raw_data = self.scope.read_raw()
             
-            # Parse data (remove header if present)
-            if data_str.startswith('#'):
-                # IEEE 488.2 binary block header - find start of data
-                header_len = int(data_str[1]) + 2
-                data_str = data_str[header_len:]
+            # Parse IEEE 488.2 binary block header
+            # Format: #<N><digits><binary_data><terminator>
+            # where N is number of digits in the byte count
+            header_start = raw_data.find(b'#')
+            if header_start == -1:
+                print("No binary block header found")
+                return None
             
-            # Convert to voltage values
-            raw_data = [float(x) for x in data_str.split(',')]
-            voltage_data = [(y - y_reference) * y_increment + y_origin for y in raw_data]
+            # Get the number of digits in the byte count
+            header_len_digits = int(chr(raw_data[header_start + 1]))
             
+            # Get the byte count
+            data_len = int(raw_data[header_start + 2:header_start + 2 + header_len_digits])
+            
+            # Extract the binary data
+            data_start = header_start + 2 + header_len_digits
+            binary_data = raw_data[data_start:data_start + data_len]
+            
+            # Convert binary data to appropriate array type based on format
+            waveform_raw = np.frombuffer(binary_data, dtype=dtype)
+            
+            # Convert to voltage using preamble scaling parameters
+            # For BYTE format: raw values are 0-255 (unsigned)
+            # For WORD format: raw values are signed int16
+            # Formula: voltage = ((raw_value - y_reference) * y_increment) + y_origin
+            voltage_data = ((waveform_raw - y_reference) * y_increment + y_origin)
+
             # Generate time data
-            time_data = [(i - x_reference) * x_increment + x_origin for i in range(len(voltage_data))]
+            num_points = len(voltage_data)
+            time_data = ((np.arange(num_points) - x_reference) * x_increment + x_origin)
             
-            print(f"Retrieved {len(voltage_data)} data points from Channel {channel}")
+            print(f"Retrieved {len(voltage_data)} data points from Channel {channel} (format: {fmt})")
             return time_data, voltage_data
             
         except Exception as e:
             print(f"Error getting waveform data: {e}")
+            import traceback
+            traceback.print_exc()
             return None
-    
-    def measure_parameter(self, channel: int, parameter: str, direction: Optional[str] = None) -> Optional[float]:
+
+    def measure_parameter(self, channel: int, parameter: str, *extra_args) -> Optional[float]:
         """
         Measure a parameter on specified channel.
         
@@ -358,7 +614,9 @@ class KeysightDSOSController:
                       'FREQuency', 'PERiod', 'VAMPlitude', 'VMAX', 'VMIN', 'VPP', 
                       'VRMS', 'VAVerage', 'VOVershoot', 'VPREshoot', 
                       'RISetime', 'FALLtime', 'PWIDth', 'NWIDth', 'PDUTycycle', 'NDUTycycle', etc.
-            direction: Optional - 'RISing' or 'FALLing' for some measurements like frequency
+            extra_args: Optional extra arguments (positional) to place before the source
+                        e.g. scope.measure_parameter(1, 'VRMS', 'AC', 'DISPlay')
+                        You may pass a list/tuple as a single extra_arg or multiple strings.
             
         Returns:
             Measurement value or None if error
@@ -371,16 +629,37 @@ class KeysightDSOSController:
             raise RuntimeError("Not connected to oscilloscope")
         
         try:
-            # Build command with source parameter
-            # Format: :MEASure:<param> <source>[,<direction>]
+            # Build command with optional extra arguments and source last
+            # Desired format examples:
+            #   :MEAS:<param>? CHANnel1
+            #   :MEAS:<param>? CYCLe,AC,CHANnel1
             source = f'CHAN{channel}'
-            
-            if direction:
-                cmd = f':MEAS:{parameter}? {source},{direction}'
-            else:
-                cmd = f':MEAS:{parameter}? {source}'
-            
-            result = self.scope.query(cmd).strip()
+
+            # Normalize extra_args (varargs) into a list of strings
+            args_list: List[str] = []
+            if extra_args:
+                # If caller passed a single list/tuple, use its contents
+                if len(extra_args) == 1 and isinstance(extra_args[0], (list, tuple)):
+                    parts = [str(x).strip() for x in extra_args[0] if x is not None]
+                    args_list.extend(parts)
+                else:
+                    # Convert all varargs to strings; allow comma-separated strings too
+                    for a in extra_args:
+                        if isinstance(a, str) and ',' in a:
+                            parts = [p.strip() for p in a.split(',') if p.strip()]
+                            args_list.extend(parts)
+                        else:
+                            args_list.append(str(a).strip())
+
+            # Always add source as the last argument
+            args_list.append(source)
+
+            # Join with commas for SCPI argument list
+            arg_segment = ','.join(args_list)
+            cmd = f':MEAS:{parameter}? {arg_segment}'
+
+            print(f"Measurement command: {cmd}")
+            result = self._query(cmd).strip()
             
             # Handle comma-separated response (value,result_state)
             if ',' in result:
@@ -418,12 +697,8 @@ class KeysightDSOSController:
         try:
             # Use :DISK:SAVE:SETup command (PDF page 509)
             self.scope.write(f':DISK:SAVE:SETup "{filename}"')
+            print(f':DISK:SAVE:SETup "{filename}"')
             time.sleep(0.5)  # Wait for file operation
-            
-            errors = self.check_errors()
-            if errors:
-                print(f"Error saving settings: {errors}")
-                return False
             
             print(f"Settings saved to: {filename}")
             return True
@@ -451,12 +726,8 @@ class KeysightDSOSController:
         try:
             # Use :DISK:LOAD command (PDF page 496)
             self.scope.write(f':DISK:LOAD "{filename}"')
+            print(f':DISK:LOAD "{filename}"')
             time.sleep(1.0)  # Wait for settings to apply
-            
-            errors = self.check_errors()
-            if errors:
-                print(f"Error loading settings: {errors}")
-                return False
             
             print(f"Settings loaded from: {filename}")
             return True
@@ -504,11 +775,6 @@ class KeysightDSOSController:
             self.scope.write(cmd)
             time.sleep(1.0)  # Wait for image capture
             
-            errors = self.check_errors()
-            if errors:
-                print(f"Error capturing screenshot: {errors}")
-                return False
-            
             print(f"Screenshot saved to: {filename} (format: {fmt})")
             return True
             
@@ -521,7 +787,7 @@ class KeysightDSOSController:
     def save_waveform_data(self, filename: str, channels: Optional[List[int]] = None, 
                           file_format: str = 'h5') -> bool:
         """
-        Save waveform data from specified channels to file.
+        Save waveform data from specified channels to file (from oscilloscope).
         
         Args:
             filename: Path to save waveform data
@@ -532,34 +798,49 @@ class KeysightDSOSController:
             True if successful
         
         Note:
-            For 'h5' and 'mat' formats, data is captured via :WAVeform commands and saved locally.
-            For 'csv' format, uses :DISK:SAVE:WAVeform command (PDF page 510) to save directly on scope.
+            Uses :DISK:SAVE:WAVeform command (PDF page 510) to save directly on scope.
         """
         if not self.scope:
             raise RuntimeError("Not connected to oscilloscope")
         
         try:
-            if file_format.lower() == 'csv':
-                # Use oscilloscope's built-in CSV save (PDF page 510)
-                # :DISK:SAVE:WAVeform <source>,"<file_name>" [,<format>[,<header>]]
-                if channels is None or len(channels) == 0:
-                    source = 'ALL'
-                elif len(channels) == 1:
-                    source = f'CHANnel{channels[0]}'
-                else:
-                    # Save each channel separately for CSV
-                    for ch in channels:
-                        ch_filename = filename.replace('.csv', f'_CH{ch}.csv')
-                        self.scope.write(f':DISK:SAVE:WAVeform CHANnel{ch},"{ch_filename}",CSV,ON')
-                        time.sleep(0.5)
-                    print("Waveform data saved to multiple CSV files")
-                    return True
-                
-                self.scope.write(f':DISK:SAVE:WAVeform {source},"{filename}",CSV,ON')
-                time.sleep(1.0)
-                print(f"Waveform data saved to: {filename} (CSV)")
-                return True
+            # Use oscilloscope's built-in save (PDF page 510)
+            # :DISK:SAVE:WAVeform <source>,"<file_name>" [,<format>[,<header>]]
+            if channels is None or len(channels) == 0 or channels.lower() == "all":
+                source = 'ALL'
+            elif len(channels) == 1:
+                source = f'CHANnel{channels[0]}'
+            else:
+                raise ValueError("Oscilloscope save only supports single channel or ALL")
+            self.scope.write(f':DISK:SAVE:WAVeform {source},"{filename}",{file_format},ON')
+            time.sleep(1.0)
+            print(f"Waveform data saved to: {filename}")
+            return True
+                        
+        except Exception as e:
+            print(f"Error saving waveform data: {e}")
+            return False
+
+    def get_waveform_data_save(self, filename: str, channels: Optional[List[int]] = None, 
+                          file_format: str = 'h5') -> bool:
+        """
+        Get waveform data from specified channels and save to file.
+        
+        Args:
+            filename: Path to save waveform data
+            channels: List of channel numbers to save (default: all enabled channels)
+            file_format: 'h5' for HDF5, 'mat' for MATLAB
             
+        Returns:
+            True if successful
+        
+        Note:
+            Data is captured via :WAVeform commands and saved locally.
+        """
+        if not self.scope:
+            raise RuntimeError("Not connected to oscilloscope")
+        
+        try:
             # For H5 and MAT formats, capture data via :WAVeform commands
             # If no channels specified, get all enabled channels
             if channels is None:
@@ -608,7 +889,7 @@ class KeysightDSOSController:
         enabled = []
         for ch in range(1, 5):
             try:
-                status = self.scope.query(f':CHAN{ch}:DISP?').strip()
+                status = self._query(f':CHAN{ch}:DISP?').strip()
                 if status == '1' or status.upper() == 'ON':
                     enabled.append(ch)
             except Exception:
@@ -631,7 +912,7 @@ class KeysightDSOSController:
             self.scope.write(':WAV:BYTeorder LSBFirst')
             
             # Get waveform preamble
-            preamble_str = self.scope.query(':WAV:PRE?').strip()
+            preamble_str = self._query(':WAV:PRE?').strip()
             preamble = preamble_str.split(',')
             
             # Extract scaling parameters
@@ -881,10 +1162,6 @@ class KeysightDSOSController:
             
             self.scope.write(f':CHAN{channel}:BWLimit {bw_value}')
             print(f"Channel {channel} bandwidth limit: {desc}")
-            
-            errors = self.check_errors()
-            if errors:
-                print(f"Bandwidth setting errors: {errors}")
                 
         except Exception as e:
             print(f"Error setting bandwidth limit: {e}")
@@ -903,7 +1180,7 @@ class KeysightDSOSController:
             raise RuntimeError("Not connected to oscilloscope")
         
         try:
-            result = self.scope.query(f':CHAN{channel}:BWLimit?').strip()
+            result = self._query(f':CHAN{channel}:BWLimit?').strip()
             return result
         except Exception as e:
             print(f"Error querying bandwidth limit: {e}")
@@ -933,10 +1210,6 @@ class KeysightDSOSController:
             self.scope.write(f':ACQ:POIN:ANAL {points}')
             print(f"Acquisition points set to: {points}")
             
-            errors = self.check_errors()
-            if errors:
-                print(f"Points setting errors: {errors}")
-                return False
             return True
             
         except Exception as e:
@@ -957,7 +1230,7 @@ class KeysightDSOSController:
             raise RuntimeError("Not connected to oscilloscope")
         
         try:
-            result = self.scope.query(':ACQ:POIN:ANAL?').strip()
+            result = self._query(':ACQ:POIN:ANAL?').strip()
             return int(float(result))
         except Exception as e:
             print(f"Error querying acquisition points: {e}")
@@ -996,10 +1269,6 @@ class KeysightDSOSController:
                 except (ValueError, TypeError):
                     print(f"Sample rate set to: {rate}")
             
-            errors = self.check_errors()
-            if errors:
-                print(f"Sample rate setting errors: {errors}")
-                return False
             return True
             
         except Exception as e:
@@ -1020,7 +1289,7 @@ class KeysightDSOSController:
             raise RuntimeError("Not connected to oscilloscope")
         
         try:
-            result = self.scope.query(':ACQ:SRAT:ANAL?').strip()
+            result = self._query(':ACQ:SRAT:ANAL?').strip()
             return float(result)
         except Exception as e:
             print(f"Error querying sample rate: {e}")
@@ -1050,13 +1319,9 @@ class KeysightDSOSController:
             if ref_upper not in ['LEFT', 'CENTER', 'RIGHT']:
                 print(f"Warning: '{reference}' may not be valid. Use LEFT, CENTer, or RIGHt")
             
-            self.scope.write(f':TIM:REF {reference}')
+            self.scope.write(f':TIMebase:REFerence {reference}')
             print(f"Timebase reference set to: {reference}")
             
-            errors = self.check_errors()
-            if errors:
-                print(f"Timebase reference errors: {errors}")
-                return False
             return True
             
         except Exception as e:
@@ -1078,7 +1343,7 @@ class KeysightDSOSController:
             raise RuntimeError("Not connected to oscilloscope")
         
         try:
-            result = self.scope.query(':TIM:REF?').strip()
+            result = self._query(':TIM:REF?').strip()
             return result
         except Exception as e:
             print(f"Error querying timebase reference: {e}")
@@ -1098,25 +1363,25 @@ def main():
     print("=== Keysight DSO-S Oscilloscope Test ===")
     
     # List available resources
-    rm = pyvisa.ResourceManager()
-    resources = rm.list_resources()
-    print(f"Available VISA resources: {resources}")
+    #rm = pyvisa.ResourceManager()
+    #resources = rm.list_resources()
+    #print(f"Available VISA resources: {resources}")
     
-    if not resources:
-        print("No VISA resources found. Please check connections.")
-        return
+    #if not resources:
+    #    print("No VISA resources found. Please check connections.")
+    #    return
     
-    # Use first available resource if default not found
-    if RESOURCE_STRING not in resources:
-        if resources:
-            RESOURCE_STRING = resources[0]
-            print(f"Using first available resource: {RESOURCE_STRING}")
-        else:
-            print("No resources available")
-            return
+    # # Use first available resource if default not found
+    # if RESOURCE_STRING not in resources:
+    #     if resources:
+    #         RESOURCE_STRING = resources[0]
+    #         print(f"Using first available resource: {RESOURCE_STRING}")
+    #     else:
+    #         print("No resources available")
+    #         return
     
     # Create controller and connect
-    scope = KeysightDSOSController(RESOURCE_STRING)
+    scope = KeysightDSOSController(RESOURCE_STRING, auto_check_errors=True)
     
     if not scope.connect():
         print("Failed to connect to oscilloscope")
@@ -1126,60 +1391,95 @@ def main():
         # Reset to known state
         scope.reset()
         
+        # Set working directory
+        print("\n=== Setting Working Directory ===")
+        scope.set_working_directory('C:\\Users\\Administrator\\Desktop\\GUI_test\\')
+
         # Configure external probes
-        scope.configure_external_probe(2, attenuation=0.1, units='AMPere', offset=0.0)
+        scope.configure_external_probe(2, gain=0.04913, units='AMPere', offset=0.0)
         
         # Set bandwidth limits
         scope.set_bandwidth_limit(1, 'FULL')
         #scope.set_bandwidth_limit(2, '200MHZ')
         
         # Configure channels
-        scope.setup_channel(1, enabled=True, scale=100.0, offset=200, coupling='DC')
-        scope.setup_channel(2, enabled=True, scale=0.5, offset=1, coupling='DC')
-        scope.setup_channel(3, enabled=False)
+        scope.setup_channel(1, enabled=True, scale=50, offset=100, coupling='DC')
+        scope.setup_channel(2, enabled=True, scale=5, offset=10, coupling='DC')
+        scope.setup_channel(3, enabled=True, scale=10, offset=0, coupling='DC')
         scope.setup_channel(4, enabled=False)
+
+        scope.set_channel_label(1, 'V_DS')
+        scope.set_channel_label(2, 'I_D')
+        scope.set_channel_label(3, 'V_GS')
+
+        scope.set_channel_invert(2, True)
         
         # Configure timebase
         scope.setup_timebase(scale=1e-3, offset=0.0)  # 1 ms/div
+        scope.set_timebase_reference("LEFT")
         
         # Configure trigger
         scope.setup_trigger(source='EXT', level=1, slope='POS', mode='EDGE')
+        scope.set_trigger_sweep('TRIGgered')
+        scope.single_acquisition()
+
         
         # Set acquisition mode
         scope.set_acquisition_mode(mode='NORM')
         
         # Save settings to file
         print("\n=== Saving Settings ===")
-        scope.save_settings('test_settings.stp')
+        scope.save_settings('test_settings')
         
+
         # Perform single acquisition
-        if scope.single_acquisition():
-            # Capture screenshot
-            print("\n=== Capturing Screenshot ===")
-            scope.capture_screenshot('screenshot.png', file_format='PNG')
-            
-            # Save waveform data
-            print("\n=== Saving Waveform Data ===")
-            scope.save_waveform_data('waveform_data.h5', channels=[1, 2], file_format='h5')
-            scope.save_waveform_data('waveform_data.mat', channels=[1, 2], file_format='mat')
-            
-            # Get waveform data for display
-            data = scope.get_waveform_data(1)
-            if data:
-                time_data, voltage_data = data
-                print(f"Sample data points: {len(voltage_data)}")
-                print(f"Time range: {min(time_data):.6f} to {max(time_data):.6f} s")
-                print(f"Voltage range: {min(voltage_data):.3f} to {max(voltage_data):.3f} V")
-            
-            # Make measurements
-            print("\n=== Measurements ===")
-            scope.measure_parameter(1, 'FREQ')
-            scope.measure_parameter(1, 'VAMP')
-            scope.measure_parameter(1, 'VRMS')
+        #if scope.wait_for_acquisition():
+        print("\n=== Performing Single Acquisition with Force Trigger ===")
+        scope.force_trigger()
+        time.sleep(1.0)  # Wait for acquisition to complete
+
+        # Capture screenshot
+        print("\n=== Capturing Screenshot ===")
+        scope.capture_screenshot('screenshot.png', file_format='PNG')
+        
+        # Save waveform data
+        #print("\n=== Saving Waveform Data ===")
+        scope.save_waveform_data('waveform_data.h5', channels='ALL', file_format='h5')
+        #scope.save_waveform_data('waveform_data.mat', channels=[1, 2], file_format='mat')
+        
+        # Get waveform data for display (test both formats)
+        # print("\n=== Getting Waveform Data (WORD format) ===")
+        # i = time.monotonic()
+        # data = scope.get_waveform_data(2, data_format='WORD')
+        # if data:
+        #     time_data, voltage_data = data
+        #     print(f"Sample data points: {len(voltage_data)}")
+        #     print(f"Time range: {min(time_data):.6f} to {max(time_data):.6f} s")
+        #     print(f"Voltage range: {min(voltage_data):.3f} to {max(voltage_data):.3f} V")
+        #     print(f"Data retrieval time: {time.monotonic() - i:.3f} seconds")
+        
+        print("\n=== Getting Waveform Data (BYTE format) ===")
+        i = time.monotonic()
+        data_byte = scope.get_waveform_data(2, data_format='BYTE')
+        if data_byte:
+            time_data_b, voltage_data_b = data_byte
+            print(f"Sample data points: {len(voltage_data_b)}")
+            print(f"Time range: {min(time_data_b):.6f} to {max(time_data_b):.6f} s")
+            print(f"Voltage range: {min(voltage_data_b):.3f} to {max(voltage_data_b):.3f} V")
+            print(f"Data retrieval time: {time.monotonic() - i:.3f} seconds")
+
+        
+        # Make measurements
+        print("\n=== Measurements ===")
+        scope.measure_parameter(1, 'FREQ')
+        scope.measure_parameter(1, 'VPP')
+        scope.measure_parameter(1, 'VRMS', 'DISPlay', 'DC')
         
         # Test loading settings
+
+        scope.setup_channel(1, enabled=False)
         print("\n=== Loading Settings ===")
-        scope.load_settings('test_settings.stp')
+        scope.load_settings('test_settings.SET')
         
         print("\nTest completed successfully!")
         

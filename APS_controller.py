@@ -130,10 +130,10 @@ class APSController:
             )
             
             # Wait for connection to stabilize
-            time.sleep(0.5)
-            
-            # Test connection with status command
-            response = self._send_command("status")
+            time.sleep(0.01)
+
+            # Test connection with status command using a short timeout to avoid long blocking
+            response = self._send_command("status", timeout=min(1.0, self.timeout))
             if response is None:
                 self.disconnect()
                 return False
@@ -184,16 +184,22 @@ class APSController:
                 response_timeout = timeout or self.timeout
                 start_time = time.time()
                 response_lines = []
+                last_data_time = time.time()
+                no_data_timeout = 0.1  # If no data for 100ms after receiving something, assume done
                 
                 while time.time() - start_time < response_timeout:
                     if self.serial_conn.in_waiting > 0:
                         line = self.serial_conn.readline().decode('ascii', errors='ignore').strip()
                         if line:
                             response_lines.append(line)
+                            last_data_time = time.time()
                             # Look for shell prompt to indicate end of response
                             if line.endswith('>') or line.endswith('$'):
                                 break
                     else:
+                        # If we've received data and no new data for no_data_timeout, we're done
+                        if response_lines and (time.time() - last_data_time) > no_data_timeout:
+                            break
                         time.sleep(0.01)
                 
                 return '\n'.join(response_lines) if response_lines else None
@@ -292,7 +298,7 @@ class APSController:
         """
         return self._send_command("start")
     
-    def info(self, print_response: bool = True) -> Optional[dict]:
+    def info(self, print_response: bool = True, timeout: Optional[float] = None) -> Optional[dict]:
         """
         Get system information from the APS controller.
         
@@ -302,7 +308,7 @@ class APSController:
         Returns:
             Dictionary with parsed system information or None if error
         """
-        response = self._send_command("info")
+        response = self._send_command("info", timeout=timeout)
         if response:
             if print_response:
                 print(response)
@@ -380,8 +386,8 @@ class APSController:
             True if board validation passes, False otherwise
         """
         try:
-            # Get system info without printing
-            info_data = self.info(print_response=False)
+            # Get system info without printing, use a short timeout to avoid additional long blocking
+            info_data = self.info(print_response=False, timeout=min(1.0, self.timeout))
             if not info_data:
                 print("Failed to get system information for validation")
                 return False
@@ -1025,7 +1031,7 @@ def main():
     """Example usage of the APS interface library."""
     
     # Configuration
-    PORT = 'COM3'  # Update with your port
+    PORT = 'COM17'  # Update with your port
     
     print("=== APS Control Software Interface Demo ===")
     

@@ -1,9 +1,9 @@
 [gui]
-last_procedure = "HighPowerPulseTest"
+last_procedure = "DoublePulseTest"
 
 [window]
-geometry = "AdnQywADAAAAAAAAAAAAIgAADv8AAAgnAAADIAAAAa0AAApUAAAGQQAAAAACAAAADwAAAAAAAAAAIgAADv8AAAgn"
-state = "AAAA/wAAAAD9AAAAAQAAAAAAAAEeAAAIBvwCAAAAAfsAAAAgAEkAbgBwAHUAdABfAFAAYQByAGEAbQBlAHQAZQByAHMBAAAAAAAACAYAAASCAP///wAADdwAAAgGAAAABAAAAAQAAAAIAAAACPwAAAAA"
+geometry = "AdnQywADAAAAAAHMAAAAeAAABbMAAAOXAAABzAAAAHgAAAWzAAADlwAAAAAAAAAAB4AAAAHMAAAAeAAABbMAAAOX"
+state = "AAAA/wAAAAD9AAAAAQAAAAAAAAEeAAADIPwCAAAAAfsAAAAgAEkAbgBwAHUAdABfAFAAYQByAGEAbQBlAHQAZQByAHMBAAAAAAAAAyAAAAL6AP///wAAAsYAAAMgAAAABAAAAAQAAAAIAAAACPwAAAAA"
 
 [directories]
 Random_Number_Test = "e:\\Projekte\\Ziemann Engineering\\Projekte\\rSCT\\Python Software\\data\\Random"
@@ -13,4 +13,7 @@ Double_Pulse_Test = "e:\\Projekte\\Ziemann Engineering\\Projekte\\HPPT2\\Python 
 [docks]
 Random_Number_Test = "json:{\"main\": [\"vertical\", [[\"dock\", \"Dock 1\", {}], [\"dock\", \"Dock 2\", {}]], {\"sizes\": [249, 249]}], \"float\": []}"
 High_Power_Pulse_Test = "json:{\"main\": [\"vertical\", [[\"dock\", \"Dock 1\", {}], [\"dock\", \"Dock 2\", {}]], {\"sizes\": [461, 459]}], \"float\": []}"
-Double_Pulse_Test = "json:{\"main\": [\"vertical\", [[\"dock\", \"Dock 1\", {}], [\"dock\", \"Dock 2\", {}]], {\"sizes\": [246, 245]}], \"float\": []}"
+Double_Pulse_Test = "json:{\"main\": [\"vertical\", [[\"dock\", \"Dock 1\", {}], [\"dock\", \"Dock 2\", {}]], {\"sizes\": [167, 166]}], \"float\": []}"
+
+[gui.connections.DoublePulseTest.aps_controller]
+connection = "COM5"

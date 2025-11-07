@@ -21,7 +21,22 @@ from datetime import datetime
 from procedures.random import RandomProcedure
 
 log = logging.getLogger(__name__)
-logging.basicConfig(filename=f"./logs/{datetime.now():%Y-%m-%d_%H-%M-%S}.log", encoding="utf-8", filemode="a", format='%(asctime)s - %(levelname)s - %(message)s')
+# Ensure logs directory exists and configure file-based logging when possible.
+logs_dir = Path('./logs')
+log_filename = logs_dir / f"{datetime.now():%Y-%m-%d_%H-%M-%S}.log"
+
+try:
+    # Try to create the logs directory (no-op if it already exists)
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    # Test that we can open the log file for appending. This will raise if the
+    # directory is not writable or the path is invalid.
+    with open(log_filename, 'a', encoding='utf-8'):
+        pass
+    # If we get here, file logging is possible.
+    logging.basicConfig(level=logging.INFO, filename=str(log_filename), encoding='utf-8', filemode='a', format='%(asctime)s - %(levelname)s - %(message)s')
+except Exception:
+    # Fall back to console logging (stderr) if any part of file setup fails.
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 
 class SettingsManager:

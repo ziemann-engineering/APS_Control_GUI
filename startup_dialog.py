@@ -16,11 +16,13 @@ from pathlib import Path
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, 
     QPushButton, QComboBox, QLineEdit, QGroupBox,
-    QApplication, QFrame, QCheckBox
+    QApplication, QFrame, QCheckBox, QMessageBox, QProgressDialog
 )
-from PyQt5.QtCore import QThread, pyqtSignal, QTimer
+from PyQt5.QtCore import QThread, pyqtSignal, QTimer, Qt
 from PyQt5.QtGui import QFont, QIcon
 import toml
+
+import pyvisa
 
 from pymeasure.experiment import Procedure
 
@@ -108,7 +110,14 @@ class ConnectionTestThread(QThread):
     
     def _test_aps_connection(self):
         """Test APS controller connection."""
-        port = self.connection_params.get('port', 'COM3')
+        # Accept multiple possible parameter names (connection, port, resource)
+        port = None
+        for key in ('port', 'connection', 'resource', 'address'):
+            if key in self.connection_params and self.connection_params.get(key):
+                port = self.connection_params.get(key)
+                break
+        if not port:
+            port = 'COM3'
         log.info(f"Testing APS controller connection on port: {port}")
         try:
             # Import and test APS controller
@@ -212,11 +221,12 @@ class ConnectionTestThread(QThread):
         
         try:
             sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-            from keysight_dso_s import KeysightDSOS
-            log.debug(f"Creating KeysightDSOS instance for resource: {resource}")
-            scope = KeysightDSOS(resource)
+            from keysight_dso_s import KeysightDSOSController
+            log.debug(f"Creating KeysightDSOSController instance for resource: {resource}")
+            scope = KeysightDSOSController(resource)
             if scope.connect():
-                idn = scope.query_id()
+                # Get IDN by querying the scope directly
+                idn = scope.scope.query('*IDN?').strip() if scope.scope else "Unknown"
                 log.info(f"Keysight oscilloscope successfully connected: {idn}")
                 scope.disconnect()
                 log.debug(f"Keysight oscilloscope disconnected from {resource}")
@@ -229,9 +239,9 @@ class ConnectionTestThread(QThread):
                     "Keysight Oscilloscope", False, "Failed to connect"
                 )
         except Exception as e:
-            log.error(f"Oscilloscope connection test error on {resource}: {e}")
+            log.error(f"Oscilloscope connection test error on {resource}: {e}", exc_info=True)
             self.connection_result.emit(
-                "Keysight Oscilloscope", False, "Connection error"
+                "Keysight Oscilloscope", False, f"Error: {str(e)}"
             )
 
 
@@ -303,11 +313,35 @@ class HardwareConfigWidget(QGroupBox):
             group_layout.addWidget(param_label, row, col)
             col += 1
             
-            # Parameter input
-            param_edit = QLineEdit(str(default))
-            param_edit.setPlaceholderText(placeholder)
-            group_layout.addWidget(param_edit, row, col)
-            col += 1
+            # Parameter input - use an editable combobox for connection-like fields
+            is_resource_field = (
+                param_name.lower() in ('connection', 'resource', 'visa', 'address', 'addr')
+                or 'visa' in label.lower()
+                or 'serial' in label.lower()
+                or 'port' in label.lower()
+            )
+
+            if is_resource_field:
+                param_combo = QComboBox()
+                param_combo.setEditable(True)
+                if default:
+                    try:
+                        param_combo.addItem(str(default))
+                        param_combo.setCurrentText(str(default))
+                    except Exception:
+                        pass
+                param_combo.setEditable(True)
+                param_combo.setToolTip(placeholder)
+                group_layout.addWidget(param_combo, row, col)
+                col += 1
+                device_widgets[param_name] = param_combo
+            else:
+                # Regular text entry
+                param_edit = QLineEdit(str(default))
+                param_edit.setPlaceholderText(placeholder)
+                group_layout.addWidget(param_edit, row, col)
+                col += 1
+                device_widgets[param_name] = param_edit
             
             # Test button and status on first row
             if first_param:
@@ -325,13 +359,38 @@ class HardwareConfigWidget(QGroupBox):
                 self.status_labels[device_type] = status_label
                 first_param = False
             
-            device_widgets[param_name] = param_edit
+            # device_widgets assignment handled above
             row += 1
         
         # Store references
         self.connection_widgets[device_type] = device_widgets
         
         layout.addWidget(group)
+
+    def apply_saved_connections(self, saved_map: dict):
+        """Apply saved connection strings to widgets.
+
+        saved_map is expected to be a mapping: { device_type: { param_name: value, ... }, ... }
+        but in this context we expect saved_map for this procedure: { device_type: { param: value }}
+        """
+        try:
+            if not saved_map:
+                return
+            for dev_type, widgets in self.connection_widgets.items():
+                dev_saved = saved_map.get(dev_type, {}) if isinstance(saved_map, dict) else {}
+                for pname, w in widgets.items():
+                    val = dev_saved.get(pname)
+                    if val is None:
+                        continue
+                    try:
+                        if hasattr(w, 'setCurrentText'):
+                            w.setCurrentText(str(val))
+                        elif hasattr(w, 'setText'):
+                            w.setText(str(val))
+                    except Exception:
+                        log.debug(f"Failed to set saved value for {dev_type}.{pname}", exc_info=True)
+        except Exception:
+            log.exception("Error applying saved connections")
     
     def _toggle_device_enabled(self, device_type, state):
         """Enable or disable all widgets for a specific device."""
@@ -359,7 +418,16 @@ class HardwareConfigWidget(QGroupBox):
         """Request connection test for specified device."""
         log.info(f"Connection test requested for device: {device_type}")
         widgets = self.connection_widgets.get(device_type, {})
-        params = {key: widget.text() for key, widget in widgets.items()}
+        params = {}
+        for key, widget in widgets.items():
+            if hasattr(widget, 'currentText'):
+                params[key] = widget.currentText()
+            elif hasattr(widget, 'text'):
+                params[key] = widget.text()
+            elif hasattr(widget, 'value'):
+                params[key] = widget.value()
+            else:
+                params[key] = str(widget)
         
         log.debug(f"{device_type} test parameters: {params}")
 
@@ -416,7 +484,9 @@ class HardwareConfigWidget(QGroupBox):
             
             device_params = {}
             for param_name, widget in widgets.items():
-                if hasattr(widget, 'text'):
+                if hasattr(widget, 'currentText'):
+                    device_params[param_name] = widget.currentText()
+                elif hasattr(widget, 'text'):
                     device_params[param_name] = widget.text()
                 elif hasattr(widget, 'value'):
                     device_params[param_name] = widget.value()
@@ -434,6 +504,7 @@ class StartupDialog(QDialog):
         self.selected_procedure = None
         self.connection_parameters = {}
         self.connection_test_thread = None
+        self.saved_connections = {}
         
         self.setWindowTitle("ZE / APS Measurement Setup")
         self.setWindowIcon(QIcon('ZE.png'))
@@ -499,24 +570,32 @@ class StartupDialog(QDialog):
         # Add some spacing before buttons
         self.main_layout.addSpacing(10)
         
+    # (Removed top-level global VISA resource input - per-device editable comboboxes are used)
+
         # Buttons
         button_layout = QHBoxLayout()
         button_layout.setSpacing(10)
-        
         button_layout.addStretch()
-        
+
+        # Scan button: placed at bottom with other action buttons
+        self.scan_visa_btn = QPushButton("Scan VISA Resources")
+        self.scan_visa_btn.setToolTip("Scan for connected VISA instruments and populate the list")
+        self.scan_visa_btn.setMinimumHeight(28)
+        self.scan_visa_btn.clicked.connect(self._scan_visa_resources)
+        button_layout.addWidget(self.scan_visa_btn)
+
         self.test_all_btn = QPushButton("Test All Connections")
         self.test_all_btn.clicked.connect(self._test_all_connections)
         self.test_all_btn.setMinimumHeight(35)
         button_layout.addWidget(self.test_all_btn)
-        
+
         self.start_btn = QPushButton("Start Measurement System")
         self.start_btn.setDefault(True)
         self.start_btn.clicked.connect(self.accept)
         self.start_btn.setMinimumHeight(35)
         self.start_btn.setMinimumWidth(150)
         button_layout.addWidget(self.start_btn)
-        
+
         self.main_layout.addWidget(QFrame())  # Spacer
         self.main_layout.addLayout(button_layout)
         self.main_layout.setContentsMargins(10, 10, 10, 10)
@@ -576,6 +655,13 @@ class StartupDialog(QDialog):
         self.hardware_widget = HardwareConfigWidget(procedure_class)
         self.hardware_widget.test_requested.connect(self._handle_test_request)
         self.main_layout.insertWidget(self.hardware_widget_index, self.hardware_widget)
+        # Apply any saved connection strings for this procedure
+        try:
+            saved_for_proc = self.saved_connections.get(procedure_class.__name__, {}) if hasattr(self, 'saved_connections') else {}
+            if saved_for_proc:
+                self.hardware_widget.apply_saved_connections(saved_for_proc)
+        except Exception:
+            log.debug('Failed to apply saved connections', exc_info=True)
         
         # Update button states
         hardware_config = getattr(procedure_class, 'HARDWARE', {})
@@ -614,6 +700,64 @@ class StartupDialog(QDialog):
             log.debug(f"Scheduling connection test for {device_type} with {delay}ms delay")
             QTimer.singleShot(delay, 
                              lambda dt=device_type, dp=device_params: self._handle_test_request(dt, dp))
+
+    def _scan_visa_resources(self):
+        """Scan for VISA resources in a background thread and populate per-device comboboxes.
+
+        Shows a modal progress dialog while scanning. Adds found resources as options to
+        each per-device editable combobox but does not change the current selection.
+        """
+        log.info("Starting VISA scan (background thread)")
+
+        progress = QProgressDialog("Scanning for VISA resources...", None, 0, 0, self)
+        progress.setWindowModality(Qt.ApplicationModal)
+        progress.setWindowTitle("VISA Scan")
+        progress.setCancelButtonText(None)
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+        progress.show()
+
+        def on_finished(resources):
+            try:
+                progress.close()
+                if not resources:
+                    QMessageBox.information(self, "VISA Scan", "No VISA resources found.")
+                    return
+
+                hw_widget = getattr(self, 'hardware_widget', None)
+                added = 0
+                if hw_widget and hasattr(hw_widget, 'connection_widgets'):
+                    for dev_type, widgets in hw_widget.connection_widgets.items():
+                        for pname, w in widgets.items():
+                            if isinstance(w, QComboBox):
+                                try:
+                                    # Add scanned resources without removing existing items or changing selection
+                                    existing = [w.itemText(i) for i in range(w.count())]
+                                    for r in resources:
+                                        if r not in existing:
+                                            w.addItem(r)
+                                            added += 1
+                                except Exception:
+                                    log.debug(f"Failed to update widget {dev_type}.{pname}", exc_info=True)
+
+                QMessageBox.information(self, "VISA Scan", f"Found {len(resources)} resource(s). Added {added} new option(s) to device lists.")
+            except Exception:
+                log.exception("Error handling scan results")
+
+        def on_error(msg):
+            progress.close()
+            log.error(f"VISA scan failed: {msg}")
+            QMessageBox.warning(self, "VISA Scan Error", f"Failed to scan VISA resources:\n{msg}")
+
+        try:
+            # Perform scan synchronously while showing modal progress dialog
+            rm = pyvisa.ResourceManager()
+            # Let the UI update the dialog before scanning
+            QApplication.processEvents()
+            resources = list(rm.list_resources())
+            on_finished(resources)
+        except Exception as e:
+            on_error(str(e))
     
     def _center_on_screen(self):
         """Center the dialog on the screen."""
@@ -627,36 +771,37 @@ class StartupDialog(QDialog):
         except Exception:
             # Fallback: let the system position the window
             pass
-    
+
     def _load_saved_settings(self):
         """Load saved settings from previous session."""
-        # Try to load last selected procedure from settings.toml
+        # Try to load settings.toml and restore GUI state (last procedure and saved VISA resource)
         try:
             settings_path = Path(__file__).parent / 'settings.toml'
             if not settings_path.exists():
                 return
             with open(settings_path, 'r', encoding='utf-8') as f:
-                settings = toml.load(f)
-            last = None
-            try:
-                last = settings.get('gui', {}).get('last_procedure')
-            except Exception:
-                last = None
-            if not last:
-                return
+                settings = toml.load(f) or {}
 
-            # Find a combo index whose associated class has the same __name__
-            for idx in range(self.procedure_combo.count()):
-                data = self.procedure_combo.itemData(idx)
-                try:
-                    name = getattr(data, '__name__', None)
-                except Exception:
-                    name = None
-                if name == last:
-                    # This will trigger _on_procedure_changed via the connected signal
-                    self.procedure_combo.setCurrentIndex(idx)
-                    log.info(f"Restored last selected procedure: {last}")
-                    break
+            gui_settings = settings.get('gui', {}) if isinstance(settings, dict) else {}
+
+            # Restore last selected procedure if present
+            last = gui_settings.get('last_procedure')
+            if last:
+                for idx in range(self.procedure_combo.count()):
+                    data = self.procedure_combo.itemData(idx)
+                    try:
+                        name = getattr(data, '__name__', None)
+                    except Exception:
+                        name = None
+                    if name == last:
+                        # This will trigger _on_procedure_changed via the connected signal
+                        self.procedure_combo.setCurrentIndex(idx)
+                        log.info(f"Restored last selected procedure: {last}")
+                        break
+
+            # Restore saved per-procedure/device connection strings
+            self.saved_connections = gui_settings.get('connections', {}) if isinstance(gui_settings, dict) else {}
+
         except Exception:
             log.debug('Failed to load saved settings', exc_info=True)
     
@@ -702,6 +847,16 @@ class StartupDialog(QDialog):
             sel = self.selected_procedure
             if sel is not None:
                 settings['gui']['last_procedure'] = getattr(sel, '__name__', str(sel))
+            # Save per-procedure device connection selections
+            try:
+                if self.hardware_widget:
+                    proc_name = getattr(self.selected_procedure, '__name__', None)
+                    if proc_name:
+                        if 'connections' not in settings['gui'] or not isinstance(settings['gui']['connections'], dict):
+                            settings['gui']['connections'] = {}
+                        settings['gui']['connections'][proc_name] = self.hardware_widget.get_connection_parameters()
+            except Exception:
+                log.debug('Failed to save per-device connections', exc_info=True)
             with open(settings_path, 'w', encoding='utf-8') as f:
                 toml.dump(settings, f)
             log.debug(f"Saved last_procedure = {settings['gui'].get('last_procedure')} to {settings_path}")
