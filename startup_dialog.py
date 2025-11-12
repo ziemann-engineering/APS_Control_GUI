@@ -9,7 +9,6 @@ This dialog allows users to:
 
 import logging
 import sys
-import os
 import importlib
 import inspect
 from pathlib import Path
@@ -116,13 +115,10 @@ class ConnectionTestThread(QThread):
             if key in self.connection_params and self.connection_params.get(key):
                 port = self.connection_params.get(key)
                 break
-        if not port:
-            port = 'COM3'
         log.info(f"Testing APS controller connection on port: {port}")
         try:
             # Import and test APS controller
-            sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-            from APS_controller import APSController
+            from hardware.APS_controller import APSController
             
             aps = APSController(port)
             log.debug(f"Created APS controller instance for port {port}")
@@ -185,8 +181,7 @@ class ConnectionTestThread(QThread):
             return
         
         try:
-            sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-            from rs_nge103 import NGE100
+            from hardware.rs_nge103 import NGE100
             log.debug(f"Creating NGE100 instance for resource: {resource}")
             psu = NGE100(resource, channels=3)
             if psu.connect():
@@ -220,8 +215,7 @@ class ConnectionTestThread(QThread):
             return
         
         try:
-            sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-            from keysight_dso_s import KeysightDSOSController
+            from hardware.keysight_dso_s import KeysightDSOSController
             log.debug(f"Creating KeysightDSOSController instance for resource: {resource}")
             scope = KeysightDSOSController(resource)
             if scope.connect():
@@ -480,18 +474,27 @@ class HardwareConfigWidget(QGroupBox):
             if device_type in self.enable_checkboxes:
                 if not self.enable_checkboxes[device_type].isChecked():
                     # Device is disabled, skip it
+                    log.debug(f"Device {device_type} is disabled, skipping")
                     continue
             
             device_params = {}
             for param_name, widget in widgets.items():
+                value = None
                 if hasattr(widget, 'currentText'):
-                    device_params[param_name] = widget.currentText()
+                    value = widget.currentText()
                 elif hasattr(widget, 'text'):
-                    device_params[param_name] = widget.text()
+                    value = widget.text()
                 elif hasattr(widget, 'value'):
-                    device_params[param_name] = widget.value()
-            params[device_type] = device_params
+                    value = widget.value()
+                
+                device_params[param_name] = value
+                log.debug(f"Captured {device_type}.{param_name} = {value}")
+            
+            if device_params:
+                params[device_type] = device_params
+                log.info(f"Captured parameters for {device_type}: {device_params}")
         
+        log.info(f"Total connection parameters captured: {list(params.keys())}")
         return params
 
 
@@ -512,8 +515,13 @@ class StartupDialog(QDialog):
         self.resize(1024, 768)
         log.debug("Startup dialog window properties set")
         
-        # Center on screen after setup
+        # Load saved connections first (before UI setup)
+        self._load_saved_settings()
+        
+        # Setup UI (this will trigger procedure change which needs saved connections)
         self._setup_ui()
+        
+        # Restore last procedure selection (now that combo exists)
         self._load_saved_settings()
         
         # Adjust size to content and center on screen
@@ -784,23 +792,25 @@ class StartupDialog(QDialog):
 
             gui_settings = settings.get('gui', {}) if isinstance(settings, dict) else {}
 
-            # Restore last selected procedure if present
-            last = gui_settings.get('last_procedure')
-            if last:
-                for idx in range(self.procedure_combo.count()):
-                    data = self.procedure_combo.itemData(idx)
-                    try:
-                        name = getattr(data, '__name__', None)
-                    except Exception:
-                        name = None
-                    if name == last:
-                        # This will trigger _on_procedure_changed via the connected signal
-                        self.procedure_combo.setCurrentIndex(idx)
-                        log.info(f"Restored last selected procedure: {last}")
-                        break
-
-            # Restore saved per-procedure/device connection strings
+            # Load saved per-procedure/device connection strings first
             self.saved_connections = gui_settings.get('connections', {}) if isinstance(gui_settings, dict) else {}
+            log.debug(f"Loaded saved connections for {len(self.saved_connections)} procedures")
+
+            # Restore last selected procedure if present (only if combo exists)
+            if hasattr(self, 'procedure_combo'):
+                last = gui_settings.get('last_procedure')
+                if last:
+                    for idx in range(self.procedure_combo.count()):
+                        data = self.procedure_combo.itemData(idx)
+                        try:
+                            name = getattr(data, '__name__', None)
+                        except Exception:
+                            name = None
+                        if name == last:
+                            # This will trigger _on_procedure_changed via the connected signal
+                            self.procedure_combo.setCurrentIndex(idx)
+                            log.info(f"Restored last selected procedure: {last}")
+                            break
 
         except Exception:
             log.debug('Failed to load saved settings', exc_info=True)

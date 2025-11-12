@@ -1,6 +1,4 @@
 import logging
-import sys
-import os
 import time
 import re
 from pymeasure.experiment import Procedure
@@ -8,9 +6,7 @@ from pymeasure.experiment import FloatParameter, Parameter, BooleanParameter, In
 
 #from datetime import datetime
 
-# Add parent directory to Python path to import APS controller
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from APS_controller import APSController
+from hardware.APS_controller import APSController
 
 log = logging.getLogger(__name__)
 
@@ -249,128 +245,63 @@ class HighPowerPulseTest(Procedure):
 
             # Monitor messages from APS controller (Steps 4-6)
             log.info('Steps 4-6: Monitoring APS controller messages...')
-            self._monitor_aps_messages()
+            
+            # Use the new monitor_messages method from APS controller
+            def handle_message(msg):
+                """Process each message from the controller."""
+                # Log at appropriate level based on message content
+                msg_lower = msg.lower()
+                if 'error' in msg_lower:
+                    log.error(f'APS: {msg}')
+                elif 'warning' in msg_lower:
+                    log.warning(f'APS: {msg}')
+                else:
+                    log.info(f'APS: {msg}')
+                
+                # Check for measurement complete
+                if 'measurement complete' in msg_lower or msg.endswith('>'):
+                    log.info('HPPT test completed')
+                    return False  # Stop monitoring
+                
+                # Check for burst messages
+                burst_match = re.match(r'burst\s+(\d+)', msg, re.IGNORECASE)
+                if burst_match:
+                    burst_number = int(burst_match.group(1))
+                    self.burst_count += 1  # Increment total burst count
+                    log.info(f'Detected burst {burst_number} (total: {self.burst_count})')
+                
+                # Check for recharging message
+                if 'recharging' in msg.lower():
+                    log.info('Detected recharging event - performing current measurement')
+                    
+                    # Measure current
+                    current = self._measure_current_with_keithley()
+                    
+                    # Emit measurement data
+                    self.emit('results', {
+                        'Timestamp': time.time(),
+                        'Burst': self.burst_count,
+                        'Current (A)': current,
+                        'Voltage (V)': self.measurement_voltage
+                    })
+                    
+                    # Send "Ig measurement done" message to APS controller
+                    log.info('Sending "Ig measurement done" to APS controller')
+                    try:
+                        if self.aps and self.aps.serial_conn:
+                            self.aps.serial_conn.write(b'Ig measurement done\n')
+                            self.aps.serial_conn.flush()
+                            log.info('"Ig measurement done" sent successfully')
+                    except Exception as e:
+                        log.error(f'Failed to send "Ig measurement done": {e}')
+                
+                return True  # Continue monitoring
+            
+            # Monitor with timeout
+            self.aps.monitor_messages(handle_message, timeout=self.timeout)
 
         except Exception as e:
             log.exception('Error during HPPT test execution: %s', e)
-
-    def _monitor_aps_messages(self):
-        """Monitor APS controller messages for burst, recharging, and measurement complete events.
-        
-        This method continuously monitors the APS serial communication for:
-        - 'burst n' messages (logged)
-        - 'recharging' messages (triggers current measurement)
-        - 'measurement complete' messages (stops monitoring)
-        
-        Note: Cannot use get_status() during test - must rely on received messages only.
-        """
-        start_time = time.time()
-        measurement_complete = False
-        
-        while time.time() - start_time < self.timeout and not measurement_complete:
-            try:
-                # Read any available messages from APS controller
-                messages = self._read_aps_messages()
-                
-                for message in messages:
-                    # Check if measurement complete was received
-                    if self._process_aps_message(message):
-                        measurement_complete = True
-                        log.info('HPPT test completed - measurement complete received')
-                        break
-                
-                # Small delay to prevent excessive CPU usage
-                time.sleep(0.01)
-                
-            except Exception as e:
-                log.debug(f'Error during message monitoring: {e}')
-                time.sleep(0.1)
-        
-        # Timeout occurred
-        if time.time() - start_time >= self.timeout and not measurement_complete:
-            log.warning(f'HPPT monitoring timed out after {self.timeout}s')
-
-    def _read_aps_messages(self):
-        """Read available messages from APS controller serial buffer.
-        
-        Returns:
-            List of message strings
-        """
-        messages = []
-        
-        if not self.aps or not self.aps.serial_conn:
-            return messages
-            
-        try:
-            # Check if data is available
-            if self.aps.serial_conn.in_waiting > 0:
-                # Read all available data
-                raw_data = self.aps.serial_conn.read(self.aps.serial_conn.in_waiting)
-                data_str = raw_data.decode('ascii', errors='ignore')
-                
-                # Split into lines and filter out empty ones
-                lines = [line.strip() for line in data_str.split('\n') if line.strip()]
-                messages.extend(lines)
-                
-        except Exception as e:
-            log.debug(f'Error reading APS messages: {e}')
-            
-        return messages
-
-    def _process_aps_message(self, message):
-        """Process a single APS controller message.
-        
-        Args:
-            message: Message string from APS controller
-            
-        Returns:
-            True if "measurement complete" was received, False otherwise
-        """
-        log.info(f'APS Message: {message}')
-        
-        # Check for measurement complete
-        if 'measurement complete' in message.lower():
-            log.info('Measurement complete received - test finished')
-            return True
-        
-        # Check for burst messages
-        burst_match = re.match(r'burst\s+(\d+)', message, re.IGNORECASE)
-        if burst_match:
-            burst_number = int(burst_match.group(1))
-            self.burst_count += 1  # Increment total burst count
-            log.info(f'Detected burst {burst_number} (total: {self.burst_count})')
-            return False
-
-        # Check for recharging message
-        if 'recharging' in message.lower():
-            log.info('Detected recharging event - performing current measurement')
-            
-            # Measure current
-            current = self._measure_current_with_keithley()
-            
-            # Emit measurement data only
-            self.emit('results', {
-                'Timestamp': time.time(),
-                'Burst': self.burst_count,
-                'Current (A)': current,
-                'Voltage (V)': self.measurement_voltage
-            })
-            
-            # Send "Ig measurement done" message to APS controller
-            log.info('Sending "Ig measurement done" to APS controller')
-            try:
-                if self.aps and self.aps.serial_conn:
-                    self.aps.serial_conn.write(b'Ig measurement done\n')
-                    self.aps.serial_conn.flush()
-                    log.info('Sent "Ig measurement done" message')
-            except Exception as e:
-                log.error(f'Error sending "Ig measurement done": {e}')
-            
-            return False
-
-        # Log other messages (no emit)
-        log.debug(f'Other APS message: {message}')
-        return False
 
     def _measure_current_with_keithley(self):
         """Perform current measurement with Keithley SMU.

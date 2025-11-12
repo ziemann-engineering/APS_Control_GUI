@@ -96,16 +96,58 @@ class APSController:
     and system control functions.
     """
     
-    def __init__(self, port: str, baudrate: int = 38400, timeout: float = 5.0):
+    @staticmethod
+    def _visa_to_com_port(resource_string: str) -> str:
+        """
+        Convert VISA resource string to serial port format.
+        
+        Args:
+            resource_string: VISA resource string or serial port path
+                - Windows VISA: 'ASRL7::INSTR' -> 'COM7'
+                - Linux VISA: 'ASRL/dev/ttyUSB0::INSTR' -> '/dev/ttyUSB0'
+                - Direct port: 'COM7' or '/dev/ttyUSB0' (unchanged)
+            
+        Returns:
+            Serial port string (e.g., 'COM7' on Windows, '/dev/ttyUSB0' on Linux)
+            
+        Examples:
+            'ASRL7::INSTR' -> 'COM7'
+            'ASRL3::INSTR' -> 'COM3'
+            'ASRL/dev/ttyUSB0::INSTR' -> '/dev/ttyUSB0'
+            'ASRL/dev/ttyACM0::INSTR' -> '/dev/ttyACM0'
+            'COM7' -> 'COM7' (unchanged)
+            '/dev/ttyUSB0' -> '/dev/ttyUSB0' (unchanged)
+        """
+        # If it's already a COM port or device path, return as-is
+        if resource_string.upper().startswith('COM') or resource_string.startswith('/dev/'):
+            return resource_string
+        
+        # Parse VISA ASRL format with Linux device path: ASRL/dev/ttyXXX::INSTR TODO:test this
+        match = re.match(r'ASRL(/dev/[^:]+)::INSTR', resource_string, re.IGNORECASE)
+        if match:
+            return match.group(1)
+        
+        # Parse VISA ASRL format with Windows port number: ASRL<number>::INSTR
+        match = re.match(r'ASRL(\d+)::INSTR', resource_string, re.IGNORECASE)
+        if match:
+            port_number = match.group(1)
+            return f'COM{port_number}'
+        
+        # If no pattern matches, return as-is and let serial.Serial handle the error
+        return resource_string
+    
+    def __init__(self, port: str, baudrate: int = 38400, timeout: float = 0.1):
         """
         Initialize APS controller interface.
         
         Args:
-            port: Serial port name (e.g., 'COM3' on Windows, '/dev/ttyUSB0' on Linux)
+            port: Serial port name (e.g., 'COM3', 'ASRL3::INSTR' on Windows, '/dev/ttyUSB0' on Linux)
             baudrate: Serial communication baud rate (default: 38400)
-            timeout: Command timeout in seconds (default: 5.0)
+            timeout: Command timeout in seconds
         """
-        self.port = port
+        # Convert VISA resource string to COM port if needed
+        self.port = self._visa_to_com_port(port)
+        self.original_port = port  # Keep original for reference
         self.baudrate = baudrate
         self.timeout = timeout
         self.serial_conn: Optional[serial.Serial] = None
@@ -119,6 +161,7 @@ class APSController:
         Returns:
             True if connection successful, False otherwise
         """
+        print(f"Connecting to APS controller on port {self.port} at {self.baudrate} baud")
         try:
             self.serial_conn = serial.Serial(
                 port=self.port,
@@ -132,8 +175,8 @@ class APSController:
             # Wait for connection to stabilize
             time.sleep(0.01)
 
-            # Test connection with status command using a short timeout to avoid long blocking
-            response = self._send_command("status", timeout=min(1.0, self.timeout))
+            # Test connection with status command
+            response = self._send_command("status")
             if response is None:
                 self.disconnect()
                 return False
@@ -181,31 +224,102 @@ class APSController:
                 self.serial_conn.flush()
                 
                 # Read response
-                response_timeout = timeout or self.timeout
+                response_timeout = timeout if timeout is not None else self.timeout
                 start_time = time.time()
                 response_lines = []
-                last_data_time = time.time()
-                no_data_timeout = 0.1  # If no data for 100ms after receiving something, assume done
                 
                 while time.time() - start_time < response_timeout:
                     if self.serial_conn.in_waiting > 0:
                         line = self.serial_conn.readline().decode('ascii', errors='ignore').strip()
                         if line:
                             response_lines.append(line)
-                            last_data_time = time.time()
                             # Look for shell prompt to indicate end of response
-                            if line.endswith('>') or line.endswith('$'):
+                            if line.endswith('>'):
                                 break
                     else:
-                        # If we've received data and no new data for no_data_timeout, we're done
-                        if response_lines and (time.time() - last_data_time) > no_data_timeout:
-                            break
                         time.sleep(0.01)
                 
                 return '\n'.join(response_lines) if response_lines else None
                 
             except Exception as e:
                 raise APSCommunicationError(f"Communication error: {e}")
+    
+    def read_message(self, timeout: float = 0.1) -> Optional[str]:
+        """
+        Read a single message line from the controller without sending a command.
+        
+        This is useful for monitoring asynchronous messages during test execution.
+        Does not use the lock, so can be called while other operations are in progress.
+        
+        Args:
+            timeout: Time to wait for a message (seconds)
+            
+        Returns:
+            Message string (stripped) or None if no message received
+        """
+        if not self.serial_conn or not self.serial_conn.is_open:
+            return None
+        
+        try:
+            # Temporarily set timeout for this read
+            old_timeout = self.serial_conn.timeout
+            self.serial_conn.timeout = timeout
+            
+            try:
+                if self.serial_conn.in_waiting > 0:
+                    line = self.serial_conn.readline().decode('ascii', errors='ignore').strip()
+                    return line if line else None
+                return None
+            finally:
+                self.serial_conn.timeout = old_timeout
+                
+        except Exception:
+            return None
+    
+    def monitor_messages(self, callback, stop_condition=None, timeout: Optional[float] = None):
+        """
+        Monitor messages from the controller and call callback for each message.
+        
+        This is designed for use during test execution where the controller sends
+        asynchronous status messages.
+        
+        Args:
+            callback: Function to call for each message. Should accept (message: str) and
+                     return True to continue monitoring, False to stop.
+            stop_condition: Optional function that returns True when monitoring should stop.
+                          Checked on each iteration.
+            timeout: Maximum time to monitor (None for no timeout)
+            
+        Returns:
+            None
+            
+        Example:
+            def handle_message(msg):
+                print(f"Controller: {msg}")
+                return "measurement complete" not in msg.lower()
+            
+            aps.monitor_messages(handle_message, timeout=60.0)
+        """
+        start_time = time.time()
+        
+        while True:
+            # Check timeout
+            if timeout and (time.time() - start_time) > timeout:
+                break
+            
+            # Check stop condition
+            if stop_condition and stop_condition():
+                break
+            
+            # Read message
+            msg = self.read_message(timeout=0.1)
+            if msg:
+                # Call callback, stop if it returns False
+                if not callback(msg):
+                    break
+            else:
+                # Small delay if no message
+                time.sleep(0.01)
     
     def _parse_status_response(self, response: str) -> SystemStatus:
         """Parse status command response."""
@@ -287,7 +401,7 @@ class APSController:
         Returns:
             Response string from controller, or None if error
         """
-        return self._send_command("selftest")
+        return self._send_command("selftest", timeout=10.0)
     
     def start(self) -> Optional[str]:
         """
@@ -386,8 +500,8 @@ class APSController:
             True if board validation passes, False otherwise
         """
         try:
-            # Get system info without printing, use a short timeout to avoid additional long blocking
-            info_data = self.info(print_response=False, timeout=min(1.0, self.timeout))
+            # Get system info without printing
+            info_data = self.info(print_response=False)
             if not info_data:
                 print("Failed to get system information for validation")
                 return False
@@ -1031,7 +1145,7 @@ def main():
     """Example usage of the APS interface library."""
     
     # Configuration
-    PORT = 'COM17'  # Update with your port
+    PORT = 'COM7'  # Update with your port
     
     print("=== APS Control Software Interface Demo ===")
     
@@ -1046,11 +1160,7 @@ def main():
             print(f"  Safety cover: {status.safety_cover}")
             print(f"  Emergency button: {status.emergency_button}")
             print(f"  System safe: {status.is_safe}")
-            
-            if not status.is_safe:
-                print("System not safe - aborting demo")
-                return
-            
+                        
             # Run self-test
             print("\nRunning self-test...")
             selftest_response = aps.self_test()
@@ -1082,7 +1192,7 @@ def main():
             
             #Example: Run DPT test (commented out for safety)
             print("\nRunning DPT test...")
-            dpt_response = aps.dpt_test(current_a=5.0, voltage_v=10.0)
+            dpt_response = aps.dpt_test(current_a=5.0, voltage_v=50.0)
             if dpt_response:
                 print(f"DPT test response: {dpt_response}")
 
@@ -1097,6 +1207,27 @@ def main():
                     print(f"Start command response: {start_response}")
                 else:
                     print("Start command sent (no response)")
+                
+                done = False
+                while not done:
+                    # Read available data from serial port
+                    if aps.serial_conn and aps.serial_conn.in_waiting > 0:
+                        try:
+                            line = aps.serial_conn.readline().decode('utf-8', errors='ignore').strip()
+                            if line:
+                                # Check if test is complete
+                                if line.endswith(">"):
+                                    done = True
+                                    print("-" * 60)
+                                    print("Test completed!")                             
+                                else:
+                                    print(line)
+                        except Exception as e:
+                            print(f"Error reading from serial: {e}")
+                            break
+                    else:
+                        # Small delay
+                        time.sleep(0.1)
             else:
                 print("Start command skipped.")
             

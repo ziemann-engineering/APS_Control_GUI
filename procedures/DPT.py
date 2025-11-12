@@ -1,6 +1,4 @@
 import logging
-import sys
-import os
 import time
 import re
 from pymeasure.experiment import Procedure
@@ -8,9 +6,7 @@ from pymeasure.experiment import FloatParameter, Parameter, BooleanParameter
 
 #from datetime import datetime
 
-# Add parent directory to Python path to import APS controller
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from APS_controller import APSController
+from hardware.APS_controller import APSController
 
 log = logging.getLogger(__name__)
 
@@ -128,7 +124,7 @@ class DoublePulseTest(Procedure):
             log.warning('No NGE100 resource provided - power supply control will be skipped')
         else:
             try:
-                from rs_nge103 import RS_NGE103
+                from hardware.rs_nge103 import RS_NGE103
                 self.nge100 = RS_NGE103(self.nge100_resource)
                 if self.nge100.connect():
                     log.info(f'Connected to NGE100 PSU on {self.nge100_resource}')
@@ -183,7 +179,7 @@ class DoublePulseTest(Procedure):
             log.warning('No oscilloscope resource provided - waveform capture will be skipped')
         else:
             try:
-                from keysight_dso_s import KeysightDSOS
+                from hardware.keysight_dso_s import KeysightDSOS
                 self.oscilloscope = KeysightDSOS(self.oscilloscope_resource)
                 if self.oscilloscope.connect():
                     log.info(f'Connected to oscilloscope on {self.oscilloscope_resource}')
@@ -310,7 +306,28 @@ class DoublePulseTest(Procedure):
 
             # Step 4: Monitor messages from APS controller
             log.info('Step 4: Monitoring APS controller messages...')
-            self._monitor_aps_messages()
+            
+            # Use the new monitor_messages method from APS controller
+            def handle_message(msg):
+                """Process each message from the controller."""
+                # Log at appropriate level based on message content
+                msg_lower = msg.lower()
+                if 'error' in msg_lower:
+                    log.error(f'APS: {msg}')
+                elif 'warning' in msg_lower:
+                    log.warning(f'APS: {msg}')
+                else:
+                    log.info(f'APS: {msg}')
+                
+                # Check for completion
+                if 'measurement complete' in msg_lower or msg.endswith('>'):
+                    log.info('DPT test completed')
+                    return False  # Stop monitoring
+                
+                return True  # Continue monitoring
+            
+            # Monitor with timeout
+            self.aps.monitor_messages(handle_message, timeout=self.timeout)
             
             # Step 5: Capture oscilloscope waveform and screenshot
             if self.oscilloscope:
@@ -321,86 +338,6 @@ class DoublePulseTest(Procedure):
         except Exception as e:
             log.exception('Error during DPT test execution: %s', e)
 
-    def _monitor_aps_messages(self):
-        """Monitor APS controller messages for test completion.
-        
-        This method continuously monitors the APS serial communication for:
-        - 'measurement complete' messages (stops monitoring)
-        
-        Note: Cannot use get_status() during test - must rely on received messages only.
-        """
-        start_time = time.time()
-        measurement_complete = False
-        
-        while time.time() - start_time < self.timeout and not measurement_complete:
-            try:
-                # Read any available messages from APS controller
-                messages = self._read_aps_messages()
-                
-                for message in messages:
-                    # Check if measurement complete was received
-                    if self._process_aps_message(message):
-                        measurement_complete = True
-                        log.info('DPT test completed - measurement complete received')
-                        break
-                
-                # Small delay to prevent excessive CPU usage
-                time.sleep(0.01)
-                
-            except Exception as e:
-                log.debug(f'Error during message monitoring: {e}')
-                time.sleep(0.1)
-        
-        # Timeout occurred
-        if time.time() - start_time >= self.timeout and not measurement_complete:
-            log.warning(f'DPT monitoring timed out after {self.timeout}s')
-
-    def _read_aps_messages(self):
-        """Read available messages from APS controller serial buffer.
-        
-        Returns:
-            List of message strings
-        """
-        messages = []
-        
-        if not self.aps or not self.aps.serial_conn:
-            return messages
-            
-        try:
-            # Check if data is available
-            if self.aps.serial_conn.in_waiting > 0:
-                # Read all available data
-                raw_data = self.aps.serial_conn.read(self.aps.serial_conn.in_waiting)
-                data_str = raw_data.decode('ascii', errors='ignore')
-                
-                # Split into lines and filter out empty ones
-                lines = [line.strip() for line in data_str.split('\n') if line.strip()]
-                messages.extend(lines)
-                
-        except Exception as e:
-            log.debug(f'Error reading APS messages: {e}')
-            
-        return messages
-
-    def _process_aps_message(self, message):
-        """Process a single APS controller message.
-        
-        Args:
-            message: Message string from APS controller
-            
-        Returns:
-            True if "measurement complete" was received, False otherwise
-        """
-        log.info(f'APS Message: {message}')
-        
-        # Check for measurement complete
-        if 'measurement complete' in message.lower():
-            log.info('Measurement complete received - test finished')
-            return True
-        
-        # Log other messages (no emit)
-        log.debug(f'Other APS message: {message}')
-        return False
 
     def _capture_waveform(self):
         """Capture and save oscilloscope waveform.
@@ -428,11 +365,11 @@ class DoublePulseTest(Procedure):
             
             # Save waveform data
             timestamp = time.strftime('%Y%m%d_%H%M%S')
-            waveform_filename = f'DPT_waveform_{timestamp}'
+            waveform_filename = f'DPT_{timestamp}'
             
             log.info(f'Saving waveform data as {waveform_filename}')
             self.oscilloscope.save_waveform_data(
-                channels=[1, 2, 3, 4],
+                channels="all",
                 filename=waveform_filename,
                 format='H5'
             )
