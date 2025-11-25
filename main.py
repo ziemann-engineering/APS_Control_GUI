@@ -153,6 +153,13 @@ class MainWindow(ManagedDockWindow):
         
         procedure_class = self.procedure.__class__
         log.info(f"Using procedure: {self.procedure.name} (internal: {self.procedure.internal_name}, short: {self.procedure.short_name})")
+        startup_connections = self.startup_config.get('connection_parameters', {})
+        try:
+            # Set on CLASS so new instances created by pymeasure also get it
+            procedure_class._startup_connection_parameters = startup_connections
+            self.procedure.connection_parameters = startup_connections
+        except Exception:
+            log.debug('Failed to attach connection parameters to procedure', exc_info=True)
         
         # Get GUI configuration from procedure class if available, otherwise use defaults
         inputs_list = getattr(procedure_class, 'INPUTS', [])
@@ -277,90 +284,52 @@ class MainWindow(ManagedDockWindow):
         connection_params = self.startup_config.get('connection_parameters', {})
         
         if not connection_params:
-            log.debug("No connection parameters to populate")
             return
         
-        log.info(f"Will populate connection parameters: {list(connection_params.keys())}")
-        
-        # Wait for the inputs widget to be fully initialized
-        # Use a longer delay to ensure the widget is ready
-        QtCore.QTimer.singleShot(500, lambda: self._do_populate_parameters(connection_params))
+        # Wait a bit for the inputs widget to be fully initialized
+        QtCore.QTimer.singleShot(100, lambda: self._do_populate_parameters(connection_params))
     
     def _do_populate_parameters(self, connection_params):
         """Actually populate the parameters after UI is ready."""
         try:
-            log.info(f"Attempting to populate connection parameters: {connection_params}")
-            
-            # Check if inputs widget exists
-            if not hasattr(self, 'inputs'):
-                log.error("MainWindow does not have 'inputs' attribute yet!")
-                return
-            
-            log.info(f"Inputs widget exists, type: {type(self.inputs)}")
-            
             # APS Controller parameters
             aps_params = connection_params.get('aps_controller', {})
-            if aps_params:
-                log.info(f"Found APS parameters: {aps_params}")
-                if hasattr(self.inputs, 'aps_port'):
-                    port = aps_params.get('connection', '')
-                    if port:
-                        self.inputs.aps_port.setText(port)
-                        log.info(f"Successfully set aps_port to: {port}")
-                else:
-                    log.warning("inputs widget does not have 'aps_port' attribute")
+            if aps_params and hasattr(self.inputs, 'aps_port'):
+                port = ''
+                for key in ('port', 'connection', 'resource', 'address'):
+                    candidate = aps_params.get(key)
+                    if candidate:
+                        port = candidate
+                        break
+                if port:
+                    self.inputs.aps_port.setText(port)
             
-            # Keithley SMU parameters
+            # Keithley parameters
             keithley_params = connection_params.get('keithley_smu', {})
-            if keithley_params:
-                log.info(f"Found Keithley parameters: {keithley_params}")
-                if hasattr(self.inputs, 'keithley_resource'):
-                    resource = keithley_params.get('connection', '')
-                    if resource:
-                        self.inputs.keithley_resource.setText(resource)
-                        log.info(f"Successfully set keithley_resource to: {resource}")
-                else:
-                    log.warning("inputs widget does not have 'keithley_resource' attribute")
+            if keithley_params and hasattr(self.inputs, 'keithley_resource'):
+                resource = ''
+                for key in ('connection', 'resource', 'address', 'port'):
+                    candidate = keithley_params.get(key)
+                    if candidate:
+                        resource = candidate
+                        break
+                if resource:
+                    self.inputs.keithley_resource.setText(resource)
+
+            aux_psu_params = connection_params.get('aux_psu', {})
+            if aux_psu_params and hasattr(self.inputs, 'aux_psu_resource'):
+                aux_resource = ''
+                for key in ('connection', 'resource', 'address', 'port'):
+                    candidate = aux_psu_params.get(key)
+                    if candidate:
+                        aux_resource = candidate
+                        break
+                if aux_resource:
+                    self.inputs.aux_psu_resource.setText(aux_resource)
             
-            # NGE103 PSU parameters (for HPPT and other procedures)
-            nge103_params = connection_params.get('nge103_psu', {})
-            if nge103_params:
-                log.info(f"Found NGE103 parameters: {nge103_params}")
-                if hasattr(self.inputs, 'nge103_resource'):
-                    resource = nge103_params.get('connection', '')
-                    if resource:
-                        self.inputs.nge103_resource.setText(resource)
-                        log.info(f"Successfully set nge103_resource to: {resource}")
-                else:
-                    log.debug("inputs widget does not have 'nge103_resource' attribute")
-            
-            # NGE100 PSU parameters (for DPT - same device, different name in procedure)
-            nge100_params = connection_params.get('nge100_psu', {})
-            if nge100_params:
-                log.info(f"Found NGE100 parameters: {nge100_params}")
-                if hasattr(self.inputs, 'nge100_resource'):
-                    resource = nge100_params.get('connection', '')
-                    if resource:
-                        self.inputs.nge100_resource.setText(resource)
-                        log.info(f"Successfully set nge100_resource to: {resource}")
-                else:
-                    log.debug("inputs widget does not have 'nge100_resource' attribute")
-            
-            # Keysight Oscilloscope parameters
-            oscilloscope_params = connection_params.get('keysight_oscilloscope', {})
-            if oscilloscope_params:
-                log.info(f"Found oscilloscope parameters: {oscilloscope_params}")
-                if hasattr(self.inputs, 'oscilloscope_resource'):
-                    resource = oscilloscope_params.get('connection', '')
-                    if resource:
-                        self.inputs.oscilloscope_resource.setText(resource)
-                        log.info(f"Successfully set oscilloscope_resource to: {resource}")
-                else:
-                    log.debug("inputs widget does not have 'oscilloscope_resource' attribute")
-            
-            log.info("Finished populating connection parameters")
+            log.info("Pre-populated connection parameters from startup configuration")
         except Exception as e:
-            log.exception(f"Failed to populate connection parameters: {e}")
+            log.debug(f"Failed to populate connection parameters: {e}")
 
     # ----- Layout and data directory persistence -----
     def _restore_layout(self):

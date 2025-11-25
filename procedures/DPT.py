@@ -16,12 +16,12 @@ class DoublePulseTest(Procedure):
     name = 'Double Pulse Test (DPT)' # For display
     internal_name = 'Double_Pulse_Test' # For internal use, no spaces or special chars
     short_name = 'DPT' # For directory naming
-    description = "Double Pulse Switching Test using APS controller, NGE100 PSU, and oscilloscope."
+    description = "Double Pulse Switching Test using APS controller, auxiliary PSU, and oscilloscope."
     #filename = f'{datetime.now():%Y-%m-%d_%H-%M-%S}' # Default filename pattern, can also use {date}, {time}, {measurement_voltage}, etc.
 
-    # APS connection parameters
+    # APS connection parameters (configured via startup dialog)
     aps_port = Parameter('APS Serial Port', default='COM3')
-    nge100_resource = Parameter('NGE100 PSU Resource', default='')
+    aux_psu_resource = Parameter('Auxiliary PSU Resource', default='')
     oscilloscope_resource = Parameter('Oscilloscope Resource', default='USB0::0x2A8D::0x904A::MY58150189::INSTR')
     
     # DPT test parameters (from firmware: current_a, voltage_v)
@@ -30,19 +30,10 @@ class DoublePulseTest(Procedure):
     test_voltage = FloatParameter('Test Voltage', units='V', default=400.0, 
                                   minimum=0.0, maximum=2000.0)
     
-    # NGE100 PSU parameters
-    nge100_ch1_voltage = FloatParameter('NGE100 Ch1 Voltage', units='V', default=24.0,
-                                        minimum=0.0, maximum=32.0)
-    nge100_ch1_current = FloatParameter('NGE100 Ch1 Current', units='A', default=0.5,
-                                        minimum=0.0, maximum=3.0)
-    nge100_ch2_voltage = FloatParameter('NGE100 Ch2 Voltage', units='V', default=5.0,
-                                        minimum=0.0, maximum=32.0)
-    nge100_ch2_current = FloatParameter('NGE100 Ch2 Current', units='A', default=0.1,
-                                        minimum=0.0, maximum=3.0)
-    nge100_ch3_voltage = FloatParameter('NGE100 Ch3 Voltage', units='V', default=20.0,
-                                        minimum=0.0, maximum=32.0)
-    nge100_ch3_current = FloatParameter('NGE100 Ch3 Current', units='A', default=0.1,
-                                        minimum=0.0, maximum=3.0)
+    # Auxiliary PSU channel parameters (format: "voltage, current" e.g. "24.0, 0.5")
+    aux_psu_ch1 = Parameter('AUX PSU Ch1 (V, A)', default='24.0, 0.5')
+    aux_psu_ch2 = Parameter('AUX PSU Ch2 (V, A)', default='5.0, 0.1')
+    aux_psu_ch3 = Parameter('AUX PSU Ch3 (V, A)', default='20.0, 0.1')
 
     # General test parameters
     wait_for_completion = BooleanParameter('Wait for test completion', default=True)
@@ -52,22 +43,16 @@ class DoublePulseTest(Procedure):
     
     # GUI Configuration
     INPUTS = [
-        'aps_port', 
-        'nge100_resource',
-        'oscilloscope_resource',
         'test_current',
         'test_voltage',
-        'nge100_ch1_voltage',
-        'nge100_ch1_current',
-        'nge100_ch2_voltage',
-        'nge100_ch2_current',
-        'nge100_ch3_voltage',
-        'nge100_ch3_current',
+        'aux_psu_ch1',
+        'aux_psu_ch2',
+        'aux_psu_ch3',
         'wait_for_completion', 
         'timeout'
     ]
     
-    DISPLAYS = INPUTS  # Display same parameters as inputs
+    DISPLAYS = INPUTS
     
     X_AXIS = 'Timestamp'
     Y_AXIS = ['Voltage (V)', 'Current (A)']
@@ -84,13 +69,23 @@ class DoublePulseTest(Procedure):
                 }
             }
         },
-        'nge100_psu': {
-            'display_name': 'R&S NGE100 Power Supply',
+        'nge103_psu': {
+            'display_name': 'R&S NGE103 Power Supply (Auxiliary PSU)',
             'parameters': {
                 'connection': {
                     'label': 'VISA Resource',
                     'default': '',
                     'placeholder': 'e.g., ASRL8::INSTR for COM8'
+                }
+            }
+        },
+        'hmc8043_psu': {
+            'display_name': 'R&S HMC8043 Power Supply',
+            'parameters': {
+                'connection': {
+                    'label': 'VISA Resource',
+                    'default': '',
+                    'placeholder': 'e.g., USB0::0x0957::0x8B18::INSTR'
                 }
             }
         },
@@ -107,50 +102,43 @@ class DoublePulseTest(Procedure):
     }
 
     def startup(self):
-        """Connect to the APS controller, NGE100 PSU, and oscilloscope.
-
-        If no port is provided or connection fails, instruments remain None and
-        execute() will emit error status.
-        """
+        """Connect to the APS controller, auxiliary PSU, and oscilloscope."""
         self.aps = None
-        self.nge100 = None
+        self.aux_psu = None
+        self.aux_psu_type = None
         self.oscilloscope = None
         self.pulse_count = 0  # Track total pulse count
         self.pulse_duration_us = None  # Will be set from APS response
+
+        # Get connection parameters from startup config
+        self._apply_connection_parameters()
         
-        # Initialize NGE100 PSU FIRST (before APS controller)
-        # This ensures Ch1 is always on before connecting to APS
-        if not self.nge100_resource:
-            log.warning('No NGE100 resource provided - power supply control will be skipped')
-        else:
+        # Configure auxiliary PSU FIRST (before APS controller)
+        aux_type, aux_resource = self._get_aux_psu_configuration()
+        if aux_resource:
+            self.aux_psu_type = aux_type or 'nge103_psu'
             try:
-                from hardware.rs_nge103 import RS_NGE103
-                self.nge100 = RS_NGE103(self.nge100_resource)
-                if self.nge100.connect():
-                    log.info(f'Connected to NGE100 PSU on {self.nge100_resource}')
-                    
-                    # Configure all three channels
-                    self.nge100.set_voltage(1, self.nge100_ch1_voltage)
-                    self.nge100.set_current(1, self.nge100_ch1_current)
-                    self.nge100.enable_output(1, True)
-                    log.info(f'NGE100 Ch1 configured and enabled: {self.nge100_ch1_voltage}V, {self.nge100_ch1_current}A')
-                    
-                    self.nge100.set_voltage(2, self.nge100_ch2_voltage)
-                    self.nge100.set_current(2, self.nge100_ch2_current)
-                    self.nge100.enable_output(2, True)
-                    log.info(f'NGE100 Ch2 configured: {self.nge100_ch2_voltage}V, {self.nge100_ch2_current}A')
-                    
-                    self.nge100.set_voltage(3, self.nge100_ch3_voltage)
-                    self.nge100.set_current(3, self.nge100_ch3_current)
-                    self.nge100.enable_output(3, True)
-                    log.info(f'NGE100 Ch3 configured: {self.nge100_ch3_voltage}V, {self.nge100_ch3_current}A')
+                controller = None
+                if self.aux_psu_type == 'hmc8043_psu':
+                    from hardware.rs_hmc8043 import RSHMC8043Controller
+                    controller = RSHMC8043Controller(aux_resource)
                 else:
-                    log.error('Failed to connect to NGE100 PSU')
-                    self.nge100 = None
+                    from hardware.rs_nge103 import NGE100
+                    controller = NGE100(aux_resource)
+
+                if controller and controller.connect():
+                    self.aux_psu = controller
+                    log.info(f'Connected to auxiliary PSU ({self.aux_psu_type}) on {aux_resource}')
+                    self._configure_aux_psu_channels()
+                else:
+                    log.error('Failed to connect to auxiliary PSU')
+                    self.aux_psu = None
             except Exception as e:
-                log.exception(f'Error initializing NGE100 PSU: {e}')
-                self.nge100 = None
-        
+                log.exception(f'Error initializing auxiliary PSU: {e}')
+                self.aux_psu = None
+        else:
+            log.warning('No auxiliary PSU resource provided - power supply control will be skipped')
+
         # Initialize APS controller (AFTER PSU is configured)
         if not self.aps_port:
             log.warning('No APS port provided for DPT procedure')
@@ -159,14 +147,14 @@ class DoublePulseTest(Procedure):
                 self.aps = APSController(self.aps_port)
                 if self.aps.connect():
                     log.info(f'Connected to APS controller on {self.aps_port}')
-                    
+
                     # Check if system is safe
                     if not self.aps.is_safe():
                         log.error('APS system is not in safe state - check safety cover and emergency button')
                         self.aps.disconnect()
                         self.aps = None
                         return
-                        
+
                 else:
                     log.error(f'Failed to connect to APS controller on {self.aps_port}')
                     self.aps = None
@@ -183,7 +171,7 @@ class DoublePulseTest(Procedure):
                 self.oscilloscope = KeysightDSOS(self.oscilloscope_resource)
                 if self.oscilloscope.connect():
                     log.info(f'Connected to oscilloscope on {self.oscilloscope_resource}')
-                    
+
                     # Configure trigger (timebase will be set later based on pulse duration)
                     self.oscilloscope.setup_trigger(
                         source='EXT',
@@ -191,16 +179,16 @@ class DoublePulseTest(Procedure):
                         mode='EDGE',
                         slope='POSitive'
                     )
-                    
+
                     # Configure channel 3 vertical scaling (always 10V/div)
                     self.oscilloscope.setup_channel(3, enabled=True, scale=10.0)
                     log.info('Oscilloscope Ch3 configured: 10V/div')
-                    
+
                     # Configure channel 2 external probe for current measurement
                     self.oscilloscope.configure_external_probe(2, gain=0.05, units='A')
                     self.oscilloscope.set_channel_invert(2, True)
                     log.info('Oscilloscope Ch2 configured: external probe 0.05 scaling, unit=Ampere, inverted')
-                    
+
                     log.info('Oscilloscope configured: EXT trigger, Ch2=current probe (inverted), Ch3=10V/div')
                 else:
                     log.error('Failed to connect to oscilloscope')
@@ -211,10 +199,79 @@ class DoublePulseTest(Procedure):
 
         if self.aps is None:
             log.warning('Could not connect to APS controller; no instrument available')
-        if self.nge100 is None:
-            log.warning('Could not connect to NGE100 PSU; power supply control will be skipped')
+        if self.aux_psu is None:
+            log.warning('Could not connect to auxiliary PSU; power supply control will be skipped')
         if self.oscilloscope is None:
             log.warning('Could not connect to oscilloscope; waveform capture will be skipped')
+
+    def _apply_connection_parameters(self):
+        """Apply connection parameters from startup dialog to procedure attributes."""
+        # Try instance attribute first, then class attribute (set by main.py)
+        params = getattr(self, 'connection_parameters', None)
+        if not params:
+            params = getattr(self.__class__, '_startup_connection_parameters', None)
+        if not params or not isinstance(params, dict):
+            return
+        
+        # APS Controller
+        aps_params = params.get('aps_controller', {})
+        if isinstance(aps_params, dict):
+            aps_port = aps_params.get('connection') or aps_params.get('port') or aps_params.get('resource')
+            if aps_port:
+                self.aps_port = aps_port
+        
+        # Oscilloscope
+        osc_params = params.get('keysight_oscilloscope', {})
+        if isinstance(osc_params, dict):
+            osc_res = osc_params.get('connection') or osc_params.get('resource')
+            if osc_res:
+                self.oscilloscope_resource = osc_res
+
+    def _get_aux_psu_configuration(self):
+        # Try instance attribute first, then class attribute (set by main.py)
+        params = getattr(self, 'connection_parameters', None)
+        if not params:
+            params = getattr(self.__class__, '_startup_connection_parameters', None)
+        if not params or not isinstance(params, dict):
+            params = {}
+        aux_info = params.get('aux_psu') if isinstance(params, dict) else {}
+        if not isinstance(aux_info, dict):
+            aux_info = {}
+        resource = aux_info.get('connection') or aux_info.get('resource') or self.aux_psu_resource
+        aux_type = aux_info.get('type')
+        if resource and not aux_type:
+            aux_type = 'nge103_psu'
+        return aux_type, resource
+
+    def _parse_aux_psu_channel(self, value):
+        """Parse 'voltage, current' string into (voltage, current) floats."""
+        try:
+            parts = [p.strip() for p in str(value).split(',')]
+            if len(parts) >= 2:
+                return float(parts[0]), float(parts[1])
+            elif len(parts) == 1:
+                return float(parts[0]), 0.1  # Default current
+        except (ValueError, TypeError):
+            pass
+        return 0.0, 0.1  # Safe defaults
+
+    def _configure_aux_psu_channels(self):
+        if self.aux_psu is None:
+            return
+        channel_params = [
+            (1, self.aux_psu_ch1),
+            (2, self.aux_psu_ch2),
+            (3, self.aux_psu_ch3),
+        ]
+        try:
+            for channel, param_value in channel_params:
+                voltage, current = self._parse_aux_psu_channel(param_value)
+                self.aux_psu.set_voltage(channel, voltage)
+                self.aux_psu.set_current(channel, current)
+                self.aux_psu.enable_output(channel, True)
+                log.info(f'AUX PSU Ch{channel} configured and enabled: {voltage}V, {current}A')
+        except Exception as e:
+            log.exception(f'Failed to configure AUX PSU channels: {e}')
 
     def execute(self):
         """Execute DPT test on APS controller with message monitoring.
@@ -426,18 +483,15 @@ class DoublePulseTest(Procedure):
                 
                 self.aps = None
             
-            # Shutdown NGE100 PSU
-            if self.nge100 is not None:
+            # Shutdown auxiliary PSU
+            if self.aux_psu is not None:
                 try:
-                    #self.nge100.enable_output(1, False)
-                    #self.nge100.enable_output(2, False)
-                    #self.nge100.enable_output(3, False)
-                    self.nge100.disconnect()
-                    log.info('Disconnected from NGE100 PSU')
+                    self.aux_psu.disconnect()
+                    log.info('Disconnected from auxiliary PSU')
                 except Exception as e:
-                    log.debug('Failed to disconnect from NGE100: %s', e)
+                    log.debug('Failed to disconnect from auxiliary PSU: %s', e)
                 
-                self.nge100 = None
+                self.aux_psu = None
             
             # Shutdown oscilloscope
             if self.oscilloscope is not None:

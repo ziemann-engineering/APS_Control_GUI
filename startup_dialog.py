@@ -94,6 +94,8 @@ class ConnectionTestThread(QThread):
                 self._test_keithley_connection()
             elif self.device_type == 'nge103_psu':
                 self._test_nge103_connection()
+            elif self.device_type == 'hmc8043_psu':
+                self._test_hmc8043_connection()
             elif self.device_type == 'keysight_oscilloscope':
                 self._test_oscilloscope_connection()
             else:
@@ -115,17 +117,21 @@ class ConnectionTestThread(QThread):
             if key in self.connection_params and self.connection_params.get(key):
                 port = self.connection_params.get(key)
                 break
+        if not port:
+            port = 'COM3'
         log.info(f"Testing APS controller connection on port: {port}")
         try:
-            # Import and test APS controller
+            self._ensure_project_path()
             from hardware.APS_controller import APSController
             
             aps = APSController(port)
             log.debug(f"Created APS controller instance for port {port}")
             if aps.connect():
                 log.info(f"APS controller successfully connected on {port}")
-                aps.disconnect()
-                log.debug(f"APS controller disconnected from {port}")
+                disconnect_method = getattr(aps, 'disconnect', None) or getattr(aps, 'close', None)
+                if callable(disconnect_method):
+                    disconnect_method()
+                    log.debug(f"APS controller disconnected from {port}")
                 self.connection_result.emit(
                     "APS Controller", True, f"Connected on {port}"
                 )
@@ -142,7 +148,11 @@ class ConnectionTestThread(QThread):
     
     def _test_keithley_connection(self):
         """Test Keithley SMU connection."""
-        resource = self.connection_params.get('resource', '')
+        resource = ''
+        for key in ('connection', 'resource', 'address', 'port'):
+            if key in self.connection_params and self.connection_params.get(key):
+                resource = self.connection_params.get(key)
+                break
         log.info(f"Testing Keithley SMU connection with resource: {resource}")
         if not resource:
             log.warning("Keithley connection test failed: No resource address provided")
@@ -152,14 +162,17 @@ class ConnectionTestThread(QThread):
             return
         
         try:
-            from pymeasure.instruments import keithley
-            log.debug(f"Creating KeithleySMU instance for resource: {resource}")
-            instrument = keithley.KeithleySMU(resource)
+            from pymeasure.instruments.keithley import Keithley2400
+            log.debug(f"Creating Keithley2400 instance for resource: {resource}")
+            instrument = Keithley2400(resource)
+            instrument.reset()
+            instrument.use_front_terminals()
+            instrument.line_frequency = 50
+            instrument.wires = 2
             # Try a simple query
             idn = instrument.id
             log.info(f"Keithley SMU successfully connected: {idn}")
-            instrument.disconnect()
-            log.debug(f"Keithley SMU disconnected from {resource}")
+            instrument.shutdown()
             self.connection_result.emit(
                 "Keithley SMU", True, f"Connected: {idn}"
             )
@@ -169,6 +182,15 @@ class ConnectionTestThread(QThread):
                 "Keithley SMU", False, "Connection error"
             )
     
+    def _ensure_project_path(self):
+        """Ensure the workspace root directory is on sys.path."""
+        try:
+            root = str(Path(__file__).resolve().parent)
+            if root not in sys.path:
+                sys.path.insert(0, root)
+        except Exception:
+            log.exception('Failed to ensure project root on sys.path')
+
     def _test_nge103_connection(self):
         """Test NGE103 power supply connection."""
         resource = self.connection_params.get('connection', '')
@@ -181,14 +203,17 @@ class ConnectionTestThread(QThread):
             return
         
         try:
+            self._ensure_project_path()
             from hardware.rs_nge103 import NGE100
             log.debug(f"Creating NGE100 instance for resource: {resource}")
             psu = NGE100(resource, channels=3)
             if psu.connect():
                 idn = psu.ID()
                 log.info(f"NGE103 PSU successfully connected: {idn}")
-                psu.disconnect()
-                log.debug(f"NGE103 PSU disconnected from {resource}")
+                disconnect_method = getattr(psu, 'disconnect', None) or getattr(psu, 'close', None)
+                if callable(disconnect_method):
+                    disconnect_method()
+                    log.debug(f"NGE103 PSU disconnected from {resource}")
                 self.connection_result.emit(
                     "NGE103 PSU", True, f"Connected: {idn}"
                 )
@@ -215,6 +240,7 @@ class ConnectionTestThread(QThread):
             return
         
         try:
+            self._ensure_project_path()
             from hardware.keysight_dso_s import KeysightDSOSController
             log.debug(f"Creating KeysightDSOSController instance for resource: {resource}")
             scope = KeysightDSOSController(resource)
@@ -222,7 +248,10 @@ class ConnectionTestThread(QThread):
                 # Get IDN by querying the scope directly
                 idn = scope.scope.query('*IDN?').strip() if scope.scope else "Unknown"
                 log.info(f"Keysight oscilloscope successfully connected: {idn}")
-                scope.disconnect()
+                disconnect_method = getattr(scope, 'disconnect', None) or getattr(scope, 'close', None)
+                if callable(disconnect_method):
+                    disconnect_method()
+                log.debug(f"Keysight oscilloscope disconnected from {resource}")
                 log.debug(f"Keysight oscilloscope disconnected from {resource}")
                 self.connection_result.emit(
                     "Keysight Oscilloscope", True, f"Connected: {idn}"
@@ -238,6 +267,40 @@ class ConnectionTestThread(QThread):
                 "Keysight Oscilloscope", False, f"Error: {str(e)}"
             )
 
+    def _test_hmc8043_connection(self):
+        """Test R&S HMC8043 PSU connection."""
+        resource = self.connection_params.get('connection', '')
+        log.info(f"Testing HMC8043 PSU connection with resource: {resource}")
+        if not resource:
+            log.warning("HMC8043 connection test failed: No resource address provided")
+            self.connection_result.emit(
+                "R&S HMC8043 Power Supply", False, "No resource address"
+            )
+            return
+        
+        try:
+            self._ensure_project_path()
+            from hardware.rs_hmc8043 import RSHMC8043Controller
+            log.debug(f"Creating RSHMC8043Controller instance for resource: {resource}")
+            controller = RSHMC8043Controller(resource)
+            if controller.connect():
+                idn = controller.psu.query('*IDN?').strip() if controller.psu else "Unknown"
+                log.info(f"HMC8043 PSU successfully connected: {idn}")
+                controller.disconnect()
+                self.connection_result.emit(
+                    "R&S HMC8043 Power Supply", True, f"Connected: {idn}"
+                )
+            else:
+                log.warning(f"HMC8043 PSU failed to connect on {resource}")
+                self.connection_result.emit(
+                    "R&S HMC8043 Power Supply", False, "Failed to connect"
+                )
+        except Exception as e:
+            log.error(f"HMC8043 connection test error on {resource}: {e}", exc_info=True)
+            self.connection_result.emit(
+                "R&S HMC8043 Power Supply", False, "Connection error"
+            )
+
 
 class HardwareConfigWidget(QGroupBox):
     """Widget for configuring hardware connections for a specific procedure."""
@@ -251,7 +314,11 @@ class HardwareConfigWidget(QGroupBox):
         self.status_labels = {}
         self.test_buttons = {}
         self.enable_checkboxes = {}  # Store enable/disable checkboxes
+        self.aux_psu_types = ('nge103_psu', 'hmc8043_psu')
         self._setup_ui()
+        active_aux = self._get_active_aux_psu_type()
+        if active_aux:
+            self._enforce_aux_psu_exclusivity(active_aux)
     
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -318,6 +385,11 @@ class HardwareConfigWidget(QGroupBox):
             if is_resource_field:
                 param_combo = QComboBox()
                 param_combo.setEditable(True)
+                # Make per-device resource combobox wider for easier selection
+                try:
+                    param_combo.setMinimumWidth(300)
+                except Exception:
+                    pass
                 if default:
                     try:
                         param_combo.addItem(str(default))
@@ -361,6 +433,27 @@ class HardwareConfigWidget(QGroupBox):
         
         layout.addWidget(group)
 
+    def apply_enabled_states(self, enabled_map: dict):
+        """Apply enabled/disabled state per device.
+
+        enabled_map is expected to be: { device_type: bool, ... }
+        """
+        try:
+            if not enabled_map:
+                return
+            for dev_type, enabled in enabled_map.items():
+                cb = self.enable_checkboxes.get(dev_type)
+                if cb is None:
+                    continue
+                try:
+                    cb.setChecked(bool(enabled))
+                    # Ensure widgets reflect the new state
+                    self._toggle_device_enabled(dev_type, 2 if enabled else 0)
+                except Exception:
+                    log.debug(f"Failed to apply enabled state for {dev_type}", exc_info=True)
+        except Exception:
+            log.exception("Error applying enabled states")
+
     def apply_saved_connections(self, saved_map: dict):
         """Apply saved connection strings to widgets.
 
@@ -388,25 +481,45 @@ class HardwareConfigWidget(QGroupBox):
     
     def _toggle_device_enabled(self, device_type, state):
         """Enable or disable all widgets for a specific device."""
-        enabled = (state == 2)  # Qt.Checked == 2
-        
-        # Enable/disable all parameter inputs
+        enabled = (state == Qt.Checked)
+        self._set_device_enabled_state(device_type, enabled)
+        if enabled and device_type in self.aux_psu_types:
+            self._enforce_aux_psu_exclusivity(device_type)
+
+    def _set_device_enabled_state(self, device_type, enabled):
+        """Apply enable/disable state without affecting other devices."""
         if device_type in self.connection_widgets:
             for widget in self.connection_widgets[device_type].values():
                 widget.setEnabled(enabled)
-        
-        # Enable/disable test button
+
         if device_type in self.test_buttons:
             self.test_buttons[device_type].setEnabled(enabled)
-        
-        # Update status label
+
         if device_type in self.status_labels:
+            label = self.status_labels[device_type]
             if not enabled:
-                self.status_labels[device_type].setText("Disabled")
-                self.status_labels[device_type].setStyleSheet("color: #999;")
+                label.setText("Disabled")
+                label.setStyleSheet("color: #999;")
             else:
-                self.status_labels[device_type].setText("Not tested")
-                self.status_labels[device_type].setStyleSheet("color: #666;")
+                label.setText("Not tested")
+                label.setStyleSheet("color: #666;")
+
+    def _enforce_aux_psu_exclusivity(self, active_device):
+        """Disable other auxiliary PSUs when one is enabled."""
+        for aux_device in self.aux_psu_types:
+            if aux_device == active_device:
+                continue
+            checkbox = self.enable_checkboxes.get(aux_device)
+            if checkbox is None or not checkbox.isChecked():
+                continue
+            checkbox.blockSignals(True)
+            checkbox.setChecked(False)
+            checkbox.blockSignals(False)
+            self._set_device_enabled_state(aux_device, False)
+            label = self.status_labels.get(aux_device)
+            if label is not None:
+                label.setText("Disabled (other PSU active)")
+                label.setStyleSheet("color: #999;")
     
     def _test_connection(self, device_type):
         """Request connection test for specified device."""
@@ -444,6 +557,8 @@ class HardwareConfigWidget(QGroupBox):
             device_type = 'keithley_smu'
         elif "NGE103" in device_name or "NGE" in device_name:
             device_type = 'nge103_psu'
+        elif "HMC8043" in device_name or "HMC" in device_name:
+            device_type = 'hmc8043_psu'
         elif "Oscilloscope" in device_name or "Keysight" in device_name:
             device_type = 'keysight_oscilloscope'
         
@@ -465,37 +580,43 @@ class HardwareConfigWidget(QGroupBox):
         else:
             log.warning(f"Could not find device type for status update: {device_name}")
     
-    def get_connection_parameters(self):
-        """Get all connection parameters for this procedure (only for enabled devices)."""
+    def get_connection_parameters(self, only_enabled=True):
+        """Get all connection parameters for this procedure.
+        
+        Args:
+            only_enabled: If True (default), only return enabled devices.
+                         If False, return all devices regardless of enabled state.
+        """
         params = {}
         
         for device_type, widgets in self.connection_widgets.items():
             # Check if device is enabled
+            is_enabled = True
             if device_type in self.enable_checkboxes:
-                if not self.enable_checkboxes[device_type].isChecked():
-                    # Device is disabled, skip it
-                    log.debug(f"Device {device_type} is disabled, skipping")
+                is_enabled = self.enable_checkboxes[device_type].isChecked()
+                if only_enabled and not is_enabled:
+                    # Device is disabled and we only want enabled, skip it
                     continue
             
             device_params = {}
             for param_name, widget in widgets.items():
-                value = None
                 if hasattr(widget, 'currentText'):
-                    value = widget.currentText()
+                    device_params[param_name] = widget.currentText()
                 elif hasattr(widget, 'text'):
-                    value = widget.text()
+                    device_params[param_name] = widget.text()
                 elif hasattr(widget, 'value'):
-                    value = widget.value()
-                
-                device_params[param_name] = value
-                log.debug(f"Captured {device_type}.{param_name} = {value}")
-            
-            if device_params:
-                params[device_type] = device_params
-                log.info(f"Captured parameters for {device_type}: {device_params}")
+                    device_params[param_name] = widget.value()
+            params[device_type] = device_params
         
-        log.info(f"Total connection parameters captured: {list(params.keys())}")
         return params
+
+    def _get_active_aux_psu_type(self):
+        """Return active auxiliary PSU device type if one is enabled."""
+        for device_type in self.aux_psu_types:
+            checkbox = self.enable_checkboxes.get(device_type)
+            if checkbox and checkbox.isChecked():
+                return device_type
+        return None
 
 
 class StartupDialog(QDialog):
@@ -512,16 +633,21 @@ class StartupDialog(QDialog):
         self.setWindowTitle("ZE / APS Measurement Setup")
         self.setWindowIcon(QIcon('ZE.png'))
         self.setModal(True)
-        self.resize(1024, 768)
+        # Default dialog size is 1024x768 unless that is the system fullscreen
+        try:
+            screen = QApplication.primaryScreen().size()
+            if screen.width() < 1200 or screen.height() < 800:
+                # If system resolution equals target, use fullscreen
+                self.showFullScreen()
+            else:
+                self.resize(1024, 768)
+        except Exception:
+            # Fallback to fixed size if primary screen cannot be queried
+            self.resize(1024, 768)
         log.debug("Startup dialog window properties set")
         
-        # Load saved connections first (before UI setup)
-        self._load_saved_settings()
-        
-        # Setup UI (this will trigger procedure change which needs saved connections)
+        # Center on screen after setup
         self._setup_ui()
-        
-        # Restore last procedure selection (now that combo exists)
         self._load_saved_settings()
         
         # Adjust size to content and center on screen
@@ -670,6 +796,13 @@ class StartupDialog(QDialog):
                 self.hardware_widget.apply_saved_connections(saved_for_proc)
         except Exception:
             log.debug('Failed to apply saved connections', exc_info=True)
+        # Apply any saved enabled/disabled states for devices
+        try:
+            saved_enabled_for_proc = self.saved_enabled.get(procedure_class.__name__, {}) if hasattr(self, 'saved_enabled') else {}
+            if saved_enabled_for_proc:
+                self.hardware_widget.apply_enabled_states(saved_enabled_for_proc)
+        except Exception:
+            log.debug('Failed to apply saved enabled states', exc_info=True)
         
         # Update button states
         hardware_config = getattr(procedure_class, 'HARDWARE', {})
@@ -792,25 +925,25 @@ class StartupDialog(QDialog):
 
             gui_settings = settings.get('gui', {}) if isinstance(settings, dict) else {}
 
-            # Load saved per-procedure/device connection strings first
+            # Load saved connections and enabled states FIRST (before restoring procedure)
             self.saved_connections = gui_settings.get('connections', {}) if isinstance(gui_settings, dict) else {}
-            log.debug(f"Loaded saved connections for {len(self.saved_connections)} procedures")
+            self.saved_enabled = gui_settings.get('enabled', {}) if isinstance(gui_settings, dict) else {}
 
-            # Restore last selected procedure if present (only if combo exists)
-            if hasattr(self, 'procedure_combo'):
-                last = gui_settings.get('last_procedure')
-                if last:
-                    for idx in range(self.procedure_combo.count()):
-                        data = self.procedure_combo.itemData(idx)
-                        try:
-                            name = getattr(data, '__name__', None)
-                        except Exception:
-                            name = None
-                        if name == last:
-                            # This will trigger _on_procedure_changed via the connected signal
-                            self.procedure_combo.setCurrentIndex(idx)
-                            log.info(f"Restored last selected procedure: {last}")
-                            break
+            # Restore last selected procedure if present
+            # This triggers _on_procedure_changed which uses saved_connections
+            last = gui_settings.get('last_procedure')
+            if last:
+                for idx in range(self.procedure_combo.count()):
+                    data = self.procedure_combo.itemData(idx)
+                    try:
+                        name = getattr(data, '__name__', None)
+                    except Exception:
+                        name = None
+                    if name == last:
+                        # This will trigger _on_procedure_changed via the connected signal
+                        self.procedure_combo.setCurrentIndex(idx)
+                        log.info(f"Restored last selected procedure: {last}")
+                        break
 
         except Exception:
             log.debug('Failed to load saved settings', exc_info=True)
@@ -836,6 +969,11 @@ class StartupDialog(QDialog):
         
         if self.hardware_widget:
             config['connection_parameters'] = self.hardware_widget.get_connection_parameters()
+            aux_type = self.hardware_widget._get_active_aux_psu_type()
+            if aux_type and aux_type in config['connection_parameters']:
+                aux_params = dict(config['connection_parameters'][aux_type])
+                aux_params.setdefault('type', aux_type)
+                config['connection_parameters']['aux_psu'] = aux_params
         
         procedure_name = getattr(procedure_instance, 'name', 'Unknown') if procedure_instance else 'None'
         log.info(f"Final configuration: procedure={procedure_name}, "
@@ -864,9 +1002,20 @@ class StartupDialog(QDialog):
                     if proc_name:
                         if 'connections' not in settings['gui'] or not isinstance(settings['gui']['connections'], dict):
                             settings['gui']['connections'] = {}
-                        settings['gui']['connections'][proc_name] = self.hardware_widget.get_connection_parameters()
+                        # Save ALL device connections (not just enabled) so they persist
+                        settings['gui']['connections'][proc_name] = self.hardware_widget.get_connection_parameters(only_enabled=False)
+                        # Also save enabled/disabled state for each device
+                        if 'enabled' not in settings['gui'] or not isinstance(settings['gui']['enabled'], dict):
+                            settings['gui']['enabled'] = {}
+                        enabled_map = {}
+                        for dev_type, checkbox in getattr(self.hardware_widget, 'enable_checkboxes', {}).items():
+                            try:
+                                enabled_map[dev_type] = bool(checkbox.isChecked())
+                            except Exception:
+                                enabled_map[dev_type] = True
+                        settings['gui']['enabled'][proc_name] = enabled_map
             except Exception:
-                log.debug('Failed to save per-device connections', exc_info=True)
+                log.debug('Failed to save per-device connections or enabled states', exc_info=True)
             with open(settings_path, 'w', encoding='utf-8') as f:
                 toml.dump(settings, f)
             log.debug(f"Saved last_procedure = {settings['gui'].get('last_procedure')} to {settings_path}")

@@ -1,7 +1,7 @@
 _*
 __pycache__/*
 data/*
-
+.venv*/
 logs/* 
 data/*
 drivers/*
