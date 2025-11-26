@@ -208,11 +208,8 @@ class MainWindow(ManagedDockWindow):
         self.setWindowTitle('ZE APS Measurement GUI')
         self.setWindowIcon(QIcon('ze.png'))
 
-        try:
-            self._enable_all_grids()
-        except Exception:
-            # Never let grid helper break the main window
-            log.exception('Failed to enable plot grids')
+        # Delay plot customization to ensure widgets are created
+        QtCore.QTimer.singleShot(100, self._customize_plots)
 
         # Pre-populate connection parameters from startup configuration
         self._populate_connection_parameters()
@@ -255,6 +252,17 @@ class MainWindow(ManagedDockWindow):
         except Exception:
             log.debug('Failed to restore initial dock layout', exc_info=True)
 
+    def _customize_plots(self):
+        """Customize plot appearance after widgets are created."""
+        try:
+            self._enable_all_grids()
+        except Exception:
+            log.debug('Failed to enable plot grids', exc_info=True)
+        try:
+            self._limit_crosshairs_precision()
+        except Exception:
+            log.debug('Failed to limit crosshairs precision', exc_info=True)
+
     def _enable_all_grids(self):
         """Helper to enable grids on all pyqtgraph plots, if pyqtgraph is
         installed and used in the GUI.
@@ -278,6 +286,30 @@ class MainWindow(ManagedDockWindow):
                         log.debug('Failed to set grid on a PlotWidget', exc_info=True)
         except Exception:
             log.debug('pyqtgraph not available or error while enabling grids', exc_info=True)
+
+    def _limit_crosshairs_precision(self):
+        """Limit the cursor coordinate display to 3 significant digits."""
+        try:
+            from pymeasure.display.widgets.plot_frame import PlotFrame
+            plot_frames = self.findChildren(PlotFrame)
+            log.info(f"Found {len(plot_frames)} PlotFrame widgets for crosshairs customization")
+            for plot_frame in plot_frames:
+                # Disconnect the original signal and connect our custom handler
+                try:
+                    plot_frame.crosshairs.coordinates.disconnect(plot_frame.update_coordinates)
+                except Exception:
+                    pass  # May already be disconnected or not connected
+                
+                # Create a new handler with limited precision
+                def make_limited_update(pf):
+                    def limited_update_coordinates(x, y):
+                        pf.coordinates.setText(f"({x:.3g}, {y:.3g})")
+                    return limited_update_coordinates
+                
+                # Connect our custom handler
+                plot_frame.crosshairs.coordinates.connect(make_limited_update(plot_frame))
+        except Exception:
+            log.exception('Failed to limit crosshairs precision')
 
     def _populate_connection_parameters(self):
         """Pre-populate input fields with connection parameters from startup configuration."""

@@ -64,8 +64,8 @@ class HighPowerPulseTest(Procedure):
     
     DISPLAYS = INPUTS  # Display same parameters as inputs
     
-    X_AXIS = 'Timestamp'
-    Y_AXIS = ['Current (A)', 'Burst']
+    X_AXIS = 'Burst'
+    Y_AXIS = 'Current (A)'
     
     # Hardware Configuration for Startup Dialog
     HARDWARE = {

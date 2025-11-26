@@ -638,7 +638,7 @@ class StartupDialog(QDialog):
             screen = QApplication.primaryScreen().size()
             if screen.width() < 1200 or screen.height() < 800:
                 # If system resolution equals target, use fullscreen
-                self.showFullScreen()
+                self.showMaximized()
             else:
                 self.resize(1024, 768)
         except Exception:
