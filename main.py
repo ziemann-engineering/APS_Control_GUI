@@ -252,12 +252,93 @@ class MainWindow(ManagedDockWindow):
         except Exception:
             log.debug('Failed to restore initial dock layout', exc_info=True)
 
+        # Initialize AUX PSU Ch1 immediately (Ch2/Ch3 enabled on measurement start)
+        QtCore.QTimer.singleShot(500, self._initialize_aux_psu)
+        
+        # Restore saved input parameters after UI is fully ready
+        QtCore.QTimer.singleShot(200, self._restore_input_parameters)
+
     def _customize_plots(self):
         """Customize plot appearance after widgets are created."""
         try:
             self._enable_all_grids()
         except Exception:
             log.debug('Failed to enable plot grids', exc_info=True)
+
+    def _initialize_aux_psu(self):
+        """Initialize AUX PSU Ch1 when main window loads.
+        
+        This enables the power supply channel immediately so the DUT has power
+        before any measurement is started. Ch2/Ch3 are enabled when measurement starts.
+        """
+        try:
+            connection_params = self.startup_config.get('connection_parameters', {})
+            aux_info = connection_params.get('aux_psu', {})
+            if not aux_info:
+                log.debug('No AUX PSU configured - skipping initialization')
+                return
+            
+            aux_resource = aux_info.get('connection') or aux_info.get('resource')
+            aux_type = aux_info.get('type', 'nge103_psu')
+            
+            if not aux_resource:
+                log.debug('No AUX PSU resource - skipping initialization')
+                return
+            
+            log.info(f'Initializing AUX PSU ({aux_type}) on {aux_resource}')
+            
+            # Create and connect to PSU
+            controller = None
+            if aux_type == 'hmc8043_psu':
+                from hardware.rs_hmc8043 import RSHMC8043Controller
+                controller = RSHMC8043Controller(aux_resource)
+            else:
+                from hardware.rs_nge103 import NGE100
+                controller = NGE100(aux_resource)
+            
+            if controller and controller.connect():
+                # Store reference for later use
+                self._aux_psu = controller
+                self._aux_psu_type = aux_type
+                
+                # Get channel parameters from procedure class
+                proc_class = self.procedure.__class__
+                ch1_param = getattr(proc_class, 'aux_psu_ch1', None)
+                if ch1_param is None:
+                    ch1_param = '24.0, 0.5'  # Default
+                
+                # Parse V, I from parameter
+                try:
+                    parts = [p.strip() for p in str(ch1_param.default if hasattr(ch1_param, 'default') else ch1_param).split(',')]
+                    voltage = float(parts[0]) if len(parts) >= 1 else 24.0
+                    current = float(parts[1]) if len(parts) >= 2 else 0.5
+                except Exception:
+                    voltage, current = 24.0, 0.5
+                
+                # Configure and enable Ch1 only
+                controller.set_voltage(1, voltage)
+                controller.set_current(1, current)
+                controller.enable_output(1, True)
+                log.info(f'AUX PSU Ch1 enabled: {voltage}V, {current}A')
+                
+                # Configure Ch2/Ch3 but leave disabled
+                for ch in (2, 3):
+                    ch_param = getattr(proc_class, f'aux_psu_ch{ch}', None)
+                    if ch_param:
+                        try:
+                            parts = [p.strip() for p in str(ch_param.default if hasattr(ch_param, 'default') else ch_param).split(',')]
+                            v = float(parts[0]) if len(parts) >= 1 else 5.0
+                            i = float(parts[1]) if len(parts) >= 2 else 0.1
+                            controller.set_voltage(ch, v)
+                            controller.set_current(ch, i)
+                            controller.enable_output(ch, False)
+                            log.info(f'AUX PSU Ch{ch} configured (disabled): {v}V, {i}A')
+                        except Exception:
+                            pass
+            else:
+                log.warning('Failed to connect to AUX PSU for initialization')
+        except Exception as e:
+            log.exception(f'Error initializing AUX PSU: {e}')
         try:
             self._limit_crosshairs_precision()
         except Exception:
@@ -475,6 +556,81 @@ class MainWindow(ManagedDockWindow):
         except Exception:
             log.debug('Failed to persist current directory', exc_info=True)
 
+    # ----- Input parameter persistence -----
+    def _restore_input_parameters(self):
+        """Restore saved input parameter values for the current procedure."""
+        try:
+            proc_name = self.procedure.internal_name
+            saved_params = self.settings_manager.get_value(f"parameters.{proc_name}", {})
+            if not saved_params:
+                log.debug(f'No saved parameters found for {proc_name}')
+                return
+            
+            for param_name, value in saved_params.items():
+                if hasattr(self.inputs, param_name):
+                    widget = getattr(self.inputs, param_name)
+                    self._set_widget_value(widget, value)
+                    log.debug(f'Restored {param_name} = {value}')
+            
+            log.info(f'Restored {len(saved_params)} saved parameters for {proc_name}')
+        except Exception:
+            log.debug('Failed to restore input parameters', exc_info=True)
+    
+    def _save_input_parameters(self):
+        """Save current input parameter values for the current procedure."""
+        try:
+            proc_name = self.procedure.internal_name
+            params = {}
+            
+            for param_name in self._inputs_list:
+                if hasattr(self.inputs, param_name):
+                    widget = getattr(self.inputs, param_name)
+                    value = self._get_widget_value(widget)
+                    if value is not None:
+                        params[param_name] = value
+            
+            if params:
+                self.settings_manager.set_value(f"parameters.{proc_name}", params)
+                log.debug(f'Saved {len(params)} parameters for {proc_name}')
+        except Exception:
+            log.debug('Failed to save input parameters', exc_info=True)
+    
+    def _get_widget_value(self, widget):
+        """Get the current value from an input widget."""
+        from PyQt5.QtWidgets import QCheckBox, QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox
+        
+        if isinstance(widget, QCheckBox):
+            return widget.isChecked()
+        elif isinstance(widget, QSpinBox):
+            return widget.value()
+        elif isinstance(widget, QDoubleSpinBox):
+            return widget.value()
+        elif isinstance(widget, QLineEdit):
+            return widget.text()
+        elif isinstance(widget, QComboBox):
+            return widget.currentText()
+        return None
+    
+    def _set_widget_value(self, widget, value):
+        """Set a value on an input widget."""
+        from PyQt5.QtWidgets import QCheckBox, QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox
+        
+        try:
+            if isinstance(widget, QCheckBox):
+                widget.setChecked(bool(value))
+            elif isinstance(widget, QSpinBox):
+                widget.setValue(int(value))
+            elif isinstance(widget, QDoubleSpinBox):
+                widget.setValue(float(value))
+            elif isinstance(widget, QLineEdit):
+                widget.setText(str(value))
+            elif isinstance(widget, QComboBox):
+                idx = widget.findText(str(value))
+                if idx >= 0:
+                    widget.setCurrentIndex(idx)
+        except Exception:
+            log.debug(f'Failed to set widget value: {value}', exc_info=True)
+
     def closeEvent(self, event):
         # Persist layout and current procedure directory on close
         try:
@@ -488,6 +644,10 @@ class MainWindow(ManagedDockWindow):
             pass
         try:
             self._persist_current_directory()
+        except Exception:
+            pass
+        try:
+            self._save_input_parameters()
         except Exception:
             pass
         super().closeEvent(event)
@@ -576,6 +736,11 @@ class MainWindow(ManagedDockWindow):
         # Persist current dock layout payload if changed
         try:
             self._save_dock_layout_for_proc()
+        except Exception:
+            pass
+        # Persist input parameters periodically
+        try:
+            self._save_input_parameters()
         except Exception:
             pass
 

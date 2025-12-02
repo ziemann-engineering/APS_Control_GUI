@@ -17,7 +17,7 @@ from PyQt5.QtWidgets import (
     QPushButton, QComboBox, QLineEdit, QGroupBox,
     QApplication, QFrame, QCheckBox, QMessageBox, QProgressDialog
 )
-from PyQt5.QtCore import QThread, pyqtSignal, QTimer, Qt
+from PyQt5.QtCore import QThread, pyqtSignal, Qt
 from PyQt5.QtGui import QFont, QIcon
 import toml
 
@@ -633,12 +633,13 @@ class StartupDialog(QDialog):
         self.setWindowTitle("ZE / APS Measurement Setup")
         self.setWindowIcon(QIcon('ZE.png'))
         self.setModal(True)
+        self._should_maximize = False
         # Default dialog size is 1024x768 unless that is the system fullscreen
         try:
             screen = QApplication.primaryScreen().size()
             if screen.width() < 1200 or screen.height() < 800:
-                # If system resolution equals target, use fullscreen
-                self.showMaximized()
+                # If system resolution is small, maximize on show
+                self._should_maximize = True
             else:
                 self.resize(1024, 768)
         except Exception:
@@ -823,24 +824,44 @@ class StartupDialog(QDialog):
         """Handle connection test result."""
         if self.hardware_widget:
             self.hardware_widget.update_connection_status(device_name, success, message)
+        
+        # Process next queued test if any
+        self._process_test_queue()
+    
+    def _process_test_queue(self):
+        """Process the next test in the queue."""
+        if not hasattr(self, '_test_queue') or not self._test_queue:
+            return
+        
+        # Check if a test is still running
+        if self.connection_test_thread and self.connection_test_thread.isRunning():
+            return
+        
+        # Get next test from queue
+        device_type, device_params = self._test_queue.pop(0)
+        log.debug(f"Processing queued test for {device_type}")
+        self._handle_test_request(device_type, device_params)
     
     def _test_all_connections(self):
-        """Test all hardware connections for the selected procedure."""
-        log.info("Testing all hardware connections")
+        """Test all enabled hardware connections for the selected procedure."""
+        log.info("Testing all enabled hardware connections")
         if not self.hardware_widget:
             log.warning("No hardware widget available for connection testing")
             return
         
-        # Get all connection parameters and test each device
-        params = self.hardware_widget.get_connection_parameters()
-        log.info(f"Found {len(params)} devices to test: {list(params.keys())}")
+        # Get connection parameters for enabled devices only
+        params = self.hardware_widget.get_connection_parameters(only_enabled=True)
+        log.info(f"Found {len(params)} enabled devices to test: {list(params.keys())}")
         
-        for device_type, device_params in params.items():
-            # Small delay between tests to avoid overwhelming the UI
-            delay = 100 * len([d for d in params.keys() if d <= device_type])
-            log.debug(f"Scheduling connection test for {device_type} with {delay}ms delay")
-            QTimer.singleShot(delay, 
-                             lambda dt=device_type, dp=device_params: self._handle_test_request(dt, dp))
+        if not params:
+            log.info("No enabled devices to test")
+            return
+        
+        # Queue all tests
+        self._test_queue = list(params.items())
+        
+        # Start processing the queue
+        self._process_test_queue()
 
     def _scan_visa_resources(self):
         """Scan for VISA resources in a background thread and populate per-device comboboxes.
@@ -912,6 +933,13 @@ class StartupDialog(QDialog):
         except Exception:
             # Fallback: let the system position the window
             pass
+
+    def showEvent(self, event):
+        """Handle show event to maximize if needed."""
+        super().showEvent(event)
+        if getattr(self, '_should_maximize', False):
+            self.showMaximized()
+            self._should_maximize = False
 
     def _load_saved_settings(self):
         """Load saved settings from previous session."""

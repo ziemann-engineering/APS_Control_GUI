@@ -264,7 +264,10 @@ class HighPowerPulseTest(Procedure):
         return 0.0, 0.1  # Safe defaults
 
     def _configure_aux_psu_channels(self):
-        """Configure all 3 AUX PSU channels with voltage and current limits."""
+        """Configure all 3 AUX PSU channels with voltage and current limits.
+        
+        Only enables Ch1 initially. Ch2 and Ch3 are enabled when measurement starts.
+        """
         if self.aux_psu is None:
             return
         channel_params = [
@@ -277,10 +280,61 @@ class HighPowerPulseTest(Procedure):
                 voltage, current = self._parse_aux_psu_channel(param_value)
                 self.aux_psu.set_voltage(channel, voltage)
                 self.aux_psu.set_current(channel, current)
-                self.aux_psu.enable_output(channel, True)
-                log.info(f'AUX PSU Ch{channel} configured and enabled: {voltage}V, {current}A')
+                # Only enable Ch1 on startup; Ch2/Ch3 enabled when measurement starts
+                if channel == 1:
+                    self.aux_psu.enable_output(channel, True)
+                    log.info(f'AUX PSU Ch{channel} configured and enabled: {voltage}V, {current}A')
+                else:
+                    self.aux_psu.enable_output(channel, False)
+                    log.info(f'AUX PSU Ch{channel} configured (disabled until measurement): {voltage}V, {current}A')
         except Exception as e:
             log.exception(f'Failed to configure AUX PSU channels: {e}')
+
+    def _enable_aux_psu_measurement_channels(self):
+        """Enable AUX PSU Ch2 and Ch3 for measurement with current parameter values."""
+        if self.aux_psu is None:
+            return
+        try:
+            channel_params = [
+                (2, self.aux_psu_ch2),
+                (3, self.aux_psu_ch3),
+            ]
+            for channel, param_value in channel_params:
+                voltage, current = self._parse_aux_psu_channel(param_value)
+                self.aux_psu.set_voltage(channel, voltage)
+                self.aux_psu.set_current(channel, current)
+                self.aux_psu.enable_output(channel, True)
+                log.info(f'AUX PSU Ch{channel} enabled for measurement: {voltage}V, {current}A')
+        except Exception as e:
+            log.exception(f'Failed to enable AUX PSU measurement channels: {e}')
+
+    def _disable_aux_psu_measurement_channels(self):
+        """Disable AUX PSU Ch2 and Ch3 after measurement."""
+        if self.aux_psu is None:
+            return
+        try:
+            for channel in (2, 3):
+                self.aux_psu.enable_output(channel, False)
+                log.info(f'AUX PSU Ch{channel} disabled after measurement')
+        except Exception as e:
+            log.exception(f'Failed to disable AUX PSU measurement channels: {e}')
+
+    def _cycle_aux_psu_ch1(self):
+        """Turn off all AUX PSU channels for 1 second, then turn Ch1 back on.
+        
+        Used during abort to reset the DUT power.
+        """
+        if self.aux_psu is None:
+            return
+        try:
+            log.info('Cycling AUX PSU: turning off all channels for 1 second')
+            for channel in (1, 2, 3):
+                self.aux_psu.enable_output(channel, False)
+            time.sleep(1.0)
+            self.aux_psu.enable_output(1, True)
+            log.info('AUX PSU Ch1 turned back on')
+        except Exception as e:
+            log.exception(f'Failed to cycle AUX PSU: {e}')
 
     def execute(self):
         """Execute HPPT test on APS controller with message monitoring.
@@ -300,6 +354,11 @@ class HighPowerPulseTest(Procedure):
         self.measurement_count = 0
 
         try:
+            # Check if abort was requested before we even start
+            if self.should_stop():
+                log.info('HPPT test aborted before start')
+                return
+
             # Check system safety before starting test
             if not self.aps.is_safe():
                 log.error('APS system safety check failed')
@@ -309,6 +368,9 @@ class HighPowerPulseTest(Procedure):
             log.info(f'Test parameters: Voltage={self.test_voltage}V, On-time={self.dut_on_time}ns, '
                     f'Period={self.pulse_period}ms, Pulses={self.pulse_count}, '
                     f'Gate measurement={self.gate_measurement}')
+
+            # Enable AUX PSU Ch2 and Ch3 for measurement
+            self._enable_aux_psu_measurement_channels()
 
             self.timeout = self.pulse_period * self.pulse_count / 1000.0 + 30.0  # Estimate timeout based on test duration + 30s buffer
             
@@ -360,6 +422,15 @@ class HighPowerPulseTest(Procedure):
                 else:
                     log.info(f'APS: {msg}')
                 
+                # Check if abort was requested
+                if self.should_stop():
+                    log.info('HPPT test aborted by user')
+                    try:
+                        self.aps.stop_test()
+                    except Exception:
+                        pass
+                    return False  # Stop monitoring
+
                 # Check for measurement complete
                 if 'Test sequence completed' in msg_lower or msg.endswith('>'):
                     log.info('HPPT test completed')
@@ -402,10 +473,25 @@ class HighPowerPulseTest(Procedure):
                 
                 return True  # Continue monitoring
             
-            # Monitor with timeout
-            self.aps.monitor_messages(handle_message, timeout=self.timeout)
+            # Monitor with timeout, also checking should_stop
+            self.aps.monitor_messages(handle_message, stop_condition=self.should_stop, timeout=self.timeout)
+
+            # If aborted, stop the test on the controller and cycle Ch1
+            if self.should_stop():
+                log.info('Stopping APS test due to abort')
+                try:
+                    self.aps.stop_test()
+                except Exception:
+                    pass
+                # Cycle Ch1 off for 1s then back on to reset DUT
+                self._cycle_aux_psu_ch1()
+
+            # Disable AUX PSU Ch2 and Ch3 after measurement completes
+            self._disable_aux_psu_measurement_channels()
 
         except Exception as e:
+            # Ensure measurement channels are disabled even on error
+            self._disable_aux_psu_measurement_channels()
             log.exception('Error during HPPT test execution: %s', e)
 
     def _measure_current_with_keithley(self):
@@ -471,15 +557,9 @@ class HighPowerPulseTest(Procedure):
                 
                 self.aps = None
 
-            # Disconnect from auxiliary PSU
+            # Disconnect from auxiliary PSU (leave outputs enabled)
             if self.aux_psu is not None:
                 try:
-                    # Disable all outputs before disconnecting
-                    for ch in (1, 2, 3):
-                        try:
-                            self.aux_psu.enable_output(ch, False)
-                        except Exception:
-                            pass
                     self.aux_psu.disconnect()
                     log.info('Disconnected from auxiliary PSU')
                 except Exception as e:
