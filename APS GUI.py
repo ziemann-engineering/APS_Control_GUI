@@ -154,6 +154,18 @@ class MainWindow(ManagedDockWindow):
         procedure_class = self.procedure.__class__
         log.info(f"Using procedure: {self.procedure.name} (internal: {self.procedure.internal_name}, short: {self.procedure.short_name})")
         startup_connections = self.startup_config.get('connection_parameters', {})
+
+        # If GSS procedure: update ListParameter choices BEFORE super().__init__ creates
+        # the INPUTS form, so the discovered serial-number dropdowns are already populated.
+        discovered = startup_connections.get('gss_discovered_devices', [])
+        if discovered:
+            try:
+                from procedures.GSS import update_device_choices
+                update_device_choices(discovered)
+                log.info(f'Updated GSS device choices: {len(discovered)} device(s)')
+            except Exception:
+                log.debug('Could not update GSS device choices', exc_info=True)
+
         try:
             # Set on CLASS so new instances created by pymeasure also get it
             procedure_class._startup_connection_parameters = startup_connections

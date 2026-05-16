@@ -1,19 +1,24 @@
 [gui]
-last_procedure = "HighPowerPulseTest"
+last_procedure = "GateStressTest"
 
 [window]
-geometry = "AdnQywADAAAAAAAAAAAAHQAADv8AAAgzAAAHKAAAArQAAAtWAAAGDgAAAAACAAAADwAAAAAAAAAAHQAADv8AAAgz"
-state = "AAAA/wAAAAD9AAAAAQAAAAAAAAGeAAAIF/wCAAAAAfsAAAAgAEkAbgBwAHUAdABfAFAAYQByAGEAbQBlAHQAZQByAHMBAAAAAAAACBcAAALvAP///wAADV0AAAgXAAAABAAAAAQAAAAIAAAACPwAAAAA"
+geometry = "AdnQywADAAAAAAAAAAAAHQAADv8AAAgzAAAHKAAAArQAAAtWAAAH1AAAAAACAAAADwAAAAAAAAAAHQAADv8AAAgz"
+state = "AAAA/wAAAAD9AAAAAQAAAAAAAAGeAAAIF/wCAAAAAfsAAAAgAEkAbgBwAHUAdABfAFAAYQByAGEAbQBlAHQAZQByAHMBAAAAAAAACBcAAAUhAP///wAADV0AAAgXAAAABAAAAAQAAAAIAAAACPwAAAAA"
 
 [directories]
 Random_Number_Test = "e:\\Projekte\\Ziemann Engineering\\Projekte\\rSCT\\Python Software\\data\\Random"
 High_Power_Pulse_Test = "./data"
 Double_Pulse_Test = "e:\\Projekte\\Ziemann Engineering\\Projekte\\HPPT2\\Python Software\\data\\DPT"
+Gate_Switching_Stress = "E:\\Projekte\\Ziemann Engineering\\Projekte\\HPPT2\\Python Software\\data\\GSS"
 
 [docks]
 Random_Number_Test = "json:{\"main\": [\"vertical\", [[\"dock\", \"Dock 1\", {}], [\"dock\", \"Dock 2\", {}]], {\"sizes\": [163, 163]}], \"float\": []}"
 High_Power_Pulse_Test = "json:{\"main\": [\"vertical\", [[\"dock\", \"Dock 1\", {}]], {\"sizes\": [950]}], \"float\": []}"
 Double_Pulse_Test = "json:{\"main\": [\"vertical\", [[\"dock\", \"Dock 1\", {}], [\"dock\", \"Dock 2\", {}]], {\"sizes\": [158, 175]}], \"float\": []}"
+Gate_Switching_Stress = "json:{\"main\": [\"vertical\", [[\"dock\", \"Dock 1\", {}]], {\"sizes\": [950]}], \"float\": []}"
+
+[gui.gss_controllers]
+GateStressTest = "[\n  {\n    \"id\": \"Ctrl1\",\n    \"port\": \"COM5\",\n    \"gss_serial\": \"\",\n    \"num_duts\": 1,\n    \"freq_hz\": 100000.0,\n    \"duty_cycle\": 0.5,\n    \"vth_method\": \"ramp_voltage\",\n    \"vth_force_current_ua\": 250.0,\n    \"vth_precond_voltage\": 0.0,\n    \"vth_threshold_current\": 1e-06,\n    \"vth_compliance_voltage\": 10.0,\n    \"psu_resource\": \"\",\n    \"psu_serial\": \"\",\n    \"psu_ch_pos\": 2,\n    \"psu_ch_neg\": 2,\n    \"v_gate_on\": 15.0,\n    \"v_gate_off\": -5.0,\n    \"tcu_port\": \"\",\n    \"tcu_serial\": \"\",\n    \"tcu_channel\": 1,\n    \"temperature_c\": 25.0,\n    \"smu_channel\": \"a\"\n  }\n]"
 
 [parameters.High_Power_Pulse_Test]
 test_voltage = 100.0
@@ -28,6 +33,29 @@ aux_psu_ch2 = "5.0, 0.1"
 aux_psu_ch3 = "15.0, 0.1"
 timeout = 300.0
 
+[parameters.Gate_Switching_Stress]
+smu_serial = ""
+gss_serial = ""
+num_duts = 1
+freq_hz = 100000.0
+duty_cycle = 0.5
+vth_method = "force_current"
+vth_force_current_ua = 250.0
+vth_precond_voltage = 0.0
+vth_threshold_current_na = 1000.0
+vth_compliance_voltage = 10.0
+psu_serial = ""
+psu_ch_pos = 1
+psu_ch_neg = 2
+v_gate_on = 15.0
+v_gate_off = -5.0
+tcu_serial = ""
+tcu_channel = 1
+temperature_c = 25.0
+log_interval_s = 60
+vth_interval_min = 60
+data_directory = "data\\GSS"
+
 [gui.enabled.HighPowerPulseTest]
 nge103_psu = true
 hmc8043_psu = false
@@ -36,6 +64,12 @@ keithley_smu = true
 keysight_oscilloscope = true
 
 [gui.enabled.RandomProcedure]
+
+[gui.enabled.GateStressTest]
+keithley_smu = true
+nge103_psu = true
+hmc8043_psu = false
+tcu = true
 
 [gui.connections.RandomProcedure]
 
@@ -62,3 +96,15 @@ connection = "GPIB::24"
 
 [gui.connections.HighPowerPulseTest.keysight_oscilloscope]
 connection = "USB0::0x2A8D::0x904A::MY58150189::INST"
+
+[gui.connections.GateStressTest.keithley_smu]
+connection = "ASRL1::INSTR"
+
+[gui.connections.GateStressTest.nge103_psu]
+connection = ""
+
+[gui.connections.GateStressTest.hmc8043_psu]
+connection = ""
+
+[gui.connections.GateStressTest.tcu]
+connection = ""

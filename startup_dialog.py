@@ -7,15 +7,20 @@ This dialog allows users to:
 3. Test connections before launching the main GUI
 """
 
+import json
 import logging
+import os
 import sys
+import time
 import importlib
 import inspect
 from pathlib import Path
 from PyQt5.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, 
+    QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel,
     QPushButton, QComboBox, QLineEdit, QGroupBox,
-    QApplication, QFrame, QCheckBox, QMessageBox, QProgressDialog
+    QApplication, QFrame, QCheckBox, QMessageBox, QProgressDialog,
+    QTableWidget, QTableWidgetItem, QHeaderView, QScrollArea, QSizePolicy,
+    QAbstractItemView,
 )
 from PyQt5.QtCore import QThread, pyqtSignal, Qt
 from PyQt5.QtGui import QFont, QIcon
@@ -685,6 +690,402 @@ class HardwareConfigWidget(QGroupBox):
         return None
 
 
+# ---------------------------------------------------------------------------
+# GSS unified hardware discovery (serial + VISA, all device types)
+# ---------------------------------------------------------------------------
+
+class GSSAllDeviceScanThread(QThread):
+    """Scans COM ports for GSS/TCU and VISA bus for PSUs/SMU in one pass."""
+    progress = pyqtSignal(str)
+    device_found = pyqtSignal(dict)   # {type, serial, port|resource, display}
+    finished = pyqtSignal()
+
+    _BAUDRATE = 38400
+    _ID_CMD = b'ID\r\n'
+
+    def run(self):
+        # ---- Phase 1: serial ports ----------------------------------------
+        try:
+            import serial.tools.list_ports
+            ports = sorted(p.device for p in serial.tools.list_ports.comports())
+        except ImportError:
+            ports = []
+
+        for port in ports:
+            self.progress.emit(f'Probing {port}…')
+            try:
+                import serial as _serial
+                with _serial.Serial(port, self._BAUDRATE, timeout=0.5) as ser:
+                    ser.reset_input_buffer()
+                    ser.write(self._ID_CMD)
+                    time.sleep(0.3)
+                    data = ser.read(256).decode('ascii', errors='ignore')
+                if 'GSS,SN:' in data:
+                    sn_part = data.split('GSS,SN:')[1].split('\n')[0].strip()
+                    sn = sn_part.split(',')[0].rstrip('>')
+                    ver = '0.0'
+                    if 'VER:' in data:
+                        ver = data.split('VER:')[1].split()[0].strip().rstrip('>')
+                    self.device_found.emit({'type': 'gss', 'serial': sn, 'version': ver,
+                                           'port': port, 'display': f'{sn}  v{ver}  ({port})'})
+                elif 'TCU,SN:' in data:
+                    sn = data.split('TCU,SN:')[1].split('\n')[0].strip().rstrip('>')
+                    self.device_found.emit({'type': 'tcu', 'serial': sn,
+                                           'port': port, 'display': f'{sn}  ({port})'})
+            except Exception:
+                pass
+
+        # ---- Phase 2: VISA ------------------------------------------------
+        self.progress.emit('Scanning VISA bus…')
+        try:
+            rm = pyvisa.ResourceManager()
+            resources = list(rm.list_resources())
+        except Exception:
+            resources = []
+
+        for res in resources:
+            self.progress.emit(f'Querying {res}…')
+            try:
+                with rm.open_resource(res) as inst:
+                    inst.timeout = 2000
+                    idn = inst.query('*IDN?').strip()
+                idn_u = idn.upper()
+                parts = [p.strip() for p in idn.split(',')]
+                sn = parts[2] if len(parts) > 2 else idn[:30]
+                if 'NGE100' in idn_u or 'NGE103' in idn_u:
+                    self.device_found.emit({'type': 'nge103', 'serial': sn,
+                                           'resource': res, 'display': f'{sn}  ({res})'})
+                elif 'HMC8043' in idn_u:
+                    self.device_found.emit({'type': 'hmc8043', 'serial': sn,
+                                           'resource': res, 'display': f'{sn}  ({res})'})
+                elif any(m in idn_u for m in ('2636', '2604', '2450', '2410')):
+                    self.device_found.emit({'type': 'keithley', 'serial': sn,
+                                           'resource': res, 'display': f'{sn}  ({res})'})
+            except Exception:
+                pass
+
+        self.finished.emit()
+
+
+class _GSSFirmwareUpdateThread(QThread):
+    """Triggers DFU mode on a GSS controller and flashes new firmware."""
+    status   = pyqtSignal(str)
+    finished = pyqtSignal(bool, str)   # (success, message)
+
+    def __init__(self, port: str, firmware_path: str, parent=None):
+        super().__init__(parent)
+        self.port = port
+        self.firmware_path = firmware_path
+
+    def run(self):
+        from hardware.gss_controller import GSSController
+        import serial as _serial
+
+        self.status.emit('Triggering DFU bootloader…')
+        try:
+            with _serial.Serial(self.port, 38400, timeout=2.0) as ser:
+                ser.reset_input_buffer()
+                ser.write(b'dfu\r\n')
+                time.sleep(0.5)
+        except Exception:
+            pass   # MCU resets immediately — disconnect is expected
+
+        self.status.emit('Waiting for bootloader…')
+        time.sleep(3.0)
+
+        self.status.emit('Flashing firmware…')
+        ok, msg = GSSController.run_dfu_update(self.firmware_path)
+        self.finished.emit(ok, msg)
+
+
+class _GSSDeviceTestThread(QThread):
+    """Tests a single device connection (serial or VISA) in the background."""
+    result = pyqtSignal(bool, str)
+
+    def __init__(self, dev_type: str, info: dict, parent=None):
+        super().__init__(parent)
+        self.dev_type = dev_type
+        self.info = info
+
+    def run(self):
+        try:
+            if self.dev_type in ('gss', 'tcu'):
+                self._test_serial()
+            else:
+                self._test_visa()
+        except Exception as exc:
+            self.result.emit(False, str(exc))
+
+    def _test_serial(self):
+        import serial as _serial
+        port = self.info.get('port', '')
+        prefix = 'GSS,SN:' if self.dev_type == 'gss' else 'TCU,SN:'
+        with _serial.Serial(port, 38400, timeout=1.0) as ser:
+            ser.reset_input_buffer()
+            ser.write(b'ID\r\n')
+            time.sleep(0.3)
+            data = ser.read(256).decode('ascii', errors='ignore')
+        if prefix in data:
+            self.result.emit(True, 'OK')
+        else:
+            self.result.emit(False, 'No valid response')
+
+    def _test_visa(self):
+        resource = self.info.get('resource', '')
+        rm = pyvisa.ResourceManager()
+        with rm.open_resource(resource) as inst:
+            inst.timeout = 3000
+            idn = inst.query('*IDN?').strip()
+        self.result.emit(True, idn[:60])
+
+
+class GSSHardwareScanWidget(QGroupBox):
+    """Discovers all GSS-related hardware via a single scan button.
+
+    Shows one row per device type (GSS, TCU, NGE103 PSU, HMC8043 PSU,
+    Keithley SMU) with a count, a dropdown of discovered serial numbers, a
+    status label, and a Test button per row.  No test parameters are
+    configured here — all test settings go in the main window INPUTS.
+    """
+
+    _ROWS = [
+        ('gss',      'GSS Controllers'),
+        ('tcu',      'TCU Units'),
+        ('nge103',   'R\u00e9S NGE103B PSU'),
+        ('hmc8043',  'R\u00e9S HMC8043 PSU'),
+        ('keithley', 'Keithley SMU'),
+    ]
+
+    def __init__(self, parent=None):
+        super().__init__('GSS Hardware Discovery', parent)
+        self._devices = []
+        self._scan_thread = None
+        self._test_threads = []
+        self._count_lbls = {}
+        self._combos = {}
+        self._status_lbls = {}
+        self._test_btns = {}
+        self._setup_ui()
+
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+
+        # Top row: scan button + status
+        top = QHBoxLayout()
+        self._scan_btn = QPushButton('Scan All Devices')
+        self._scan_btn.clicked.connect(self._start_scan)
+        self._progress_lbl = QLabel(
+            'Press "Scan All" to discover connected GSS controllers, TCUs, PSUs and SMU.'
+        )
+        self._progress_lbl.setWordWrap(True)
+        top.addWidget(self._scan_btn)
+        top.addWidget(self._progress_lbl, 1)
+        layout.addLayout(top)
+
+        # One grid row per device type
+        grid = QGridLayout()
+        grid.setColumnMinimumWidth(0, 140)   # label
+        grid.setColumnMinimumWidth(1, 75)    # count
+        grid.setColumnStretch(2, 1)          # combo
+        grid.setColumnMinimumWidth(3, 120)   # status
+        grid.setColumnMinimumWidth(4, 55)    # test button
+
+        for row, (dev_type, label) in enumerate(self._ROWS):
+            grid.addWidget(QLabel(f'{label}:'), row, 0)
+
+            count_lbl = QLabel('\u2014')
+            self._count_lbls[dev_type] = count_lbl
+            grid.addWidget(count_lbl, row, 1)
+
+            combo = QComboBox()
+            combo.addItem('(not scanned)')
+            combo.setEnabled(False)
+            self._combos[dev_type] = combo
+            grid.addWidget(combo, row, 2)
+
+            status_lbl = QLabel('')
+            self._status_lbls[dev_type] = status_lbl
+            grid.addWidget(status_lbl, row, 3)
+
+            test_btn = QPushButton('Test')
+            test_btn.setEnabled(False)
+            test_btn.clicked.connect(
+                lambda _checked, t=dev_type: self._test_device(t)
+            )
+            self._test_btns[dev_type] = test_btn
+            grid.addWidget(test_btn, row, 4)
+
+        layout.addLayout(grid)
+
+    def _start_scan(self):
+        if self._scan_thread and self._scan_thread.isRunning():
+            return
+        self._devices.clear()
+        for dev_type, _ in self._ROWS:
+            self._count_lbls[dev_type].setText('\u2026')
+            combo = self._combos[dev_type]
+            combo.clear()
+            combo.addItem('(scanning\u2026)')
+            combo.setEnabled(False)
+            self._status_lbls[dev_type].setText('')
+            self._test_btns[dev_type].setEnabled(False)
+        self._scan_btn.setEnabled(False)
+        self._progress_lbl.setText('Scanning\u2026')
+        self._scan_thread = GSSAllDeviceScanThread()
+        self._scan_thread.progress.connect(self._progress_lbl.setText)
+        self._scan_thread.device_found.connect(self._on_device_found)
+        self._scan_thread.finished.connect(self._on_scan_done)
+        self._scan_thread.start()
+
+    def _on_device_found(self, info: dict):
+        self._devices.append(info)
+        dev_type = info.get('type', '')
+        if dev_type not in self._combos:
+            return
+        combo = self._combos[dev_type]
+        # Clear placeholder on first find
+        if combo.count() == 1 and combo.itemText(0) in (
+                '(scanning\u2026)', '(not scanned)', '(none found)'):
+            combo.clear()
+        combo.addItem(info.get('display', info.get('serial', '?')), info)
+        combo.setEnabled(True)
+
+    def _on_scan_done(self):
+        self._scan_btn.setEnabled(True)
+        for dev_type, _ in self._ROWS:
+            count = sum(1 for d in self._devices if d.get('type') == dev_type)
+            self._count_lbls[dev_type].setText(
+                f'{count} found' if count else '0 found'
+            )
+            if count == 0:
+                combo = self._combos[dev_type]
+                combo.clear()
+                combo.addItem('(none found)')
+                combo.setEnabled(False)
+                self._test_btns[dev_type].setEnabled(False)
+            else:
+                self._test_btns[dev_type].setEnabled(True)
+        totals = ', '.join(
+            f'{sum(1 for d in self._devices if d.get("type") == t)} {lbl}'
+            for t, lbl in self._ROWS
+            if any(d.get('type') == t for d in self._devices)
+        )
+        self._progress_lbl.setText(
+            f'Scan complete. {totals}.' if totals else 'No devices found.'
+        )
+        self._check_firmware_updates()
+
+    def _check_firmware_updates(self):
+        """Check all discovered GSS devices for available firmware updates."""
+        from hardware.gss_controller import GSSController, FIRMWARE_DIR
+        for dev in self._devices:
+            if dev.get('type') != 'gss':
+                continue
+            ver = dev.get('version', '0.0')
+            fw_path = GSSController.find_firmware_update(ver, FIRMWARE_DIR)
+            if not fw_path:
+                continue
+            fw_name = os.path.basename(fw_path)
+            answer = QMessageBox.question(
+                self,
+                'Firmware Update Available',
+                f'GSS controller SN:{dev["serial"]} is running firmware v{ver}.\n'
+                f'A newer firmware is available: {fw_name}\n\n'
+                'Update now?  The device will reboot automatically.',
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes,
+            )
+            if answer == QMessageBox.Yes:
+                self._do_firmware_update(dev, fw_path)
+
+    def _do_firmware_update(self, dev: dict, fw_path: str):
+        """Flash new firmware to a GSS device via DFU."""
+        port = dev.get('port', '')
+        prog = QProgressDialog('Preparing firmware update\u2026', None, 0, 0, self)
+        prog.setWindowTitle('GSS Firmware Update')
+        prog.setWindowModality(Qt.WindowModal)
+        prog.setMinimumDuration(0)
+        prog.show()
+        QApplication.processEvents()
+
+        thread = _GSSFirmwareUpdateThread(port, fw_path, parent=self)
+
+        def _on_status(msg: str):
+            prog.setLabelText(msg)
+            QApplication.processEvents()
+
+        def _on_done(ok: bool, msg: str):
+            prog.close()
+            if ok:
+                QMessageBox.information(
+                    self, 'Firmware Update',
+                    'Firmware updated successfully.\n'
+                    'The device has restarted with the new firmware.\n'
+                    'Re-scanning\u2026',
+                )
+                self._start_scan()
+            else:
+                QMessageBox.critical(
+                    self, 'Firmware Update Failed',
+                    f'Update failed:\n{msg}\n\n'
+                    'Check that dfu-util is installed and on PATH.',
+                )
+
+        thread.status.connect(_on_status)
+        thread.finished.connect(_on_done)
+        self._test_threads.append(thread)
+        thread.start()
+
+    def _test_device(self, dev_type: str):
+        combo = self._combos[dev_type]
+        info = combo.currentData()
+        if not info:
+            return
+        self._status_lbls[dev_type].setText('Testing\u2026')
+        self._test_btns[dev_type].setEnabled(False)
+        thread = _GSSDeviceTestThread(dev_type, info)
+        thread.result.connect(
+            lambda ok, msg, t=dev_type: self._on_test_result(t, ok, msg)
+        )
+        self._test_threads.append(thread)
+        thread.start()
+
+    def _on_test_result(self, dev_type: str, ok: bool, message: str):
+        lbl = self._status_lbls[dev_type]
+        lbl.setText(f'{"✓" if ok else "✗"} {message}')
+        lbl.setStyleSheet(f'color: {"#27ae60" if ok else "#e74c3c"};')
+        self._test_btns[dev_type].setEnabled(True)
+
+    def get_discovered_devices(self) -> list:
+        return list(self._devices)
+
+    def get_connection_parameters(self) -> dict:
+        """Return a dict compatible with HardwareConfigWidget output."""
+        result = {}
+        for dev_type, _ in self._ROWS:
+            combo = self._combos[dev_type]
+            info = combo.currentData()
+            if not info:
+                continue
+            if dev_type == 'gss':
+                result['gss_controller'] = {'connection': info.get('port', ''),
+                                             'serial': info.get('serial', '')}
+            elif dev_type == 'tcu':
+                result['tcu'] = {'connection': info.get('port', ''),
+                                 'serial': info.get('serial', '')}
+            elif dev_type == 'nge103':
+                result['nge103_psu'] = {'connection': info.get('resource', ''),
+                                         'serial': info.get('serial', '')}
+            elif dev_type == 'hmc8043':
+                result['hmc8043_psu'] = {'connection': info.get('resource', ''),
+                                          'serial': info.get('serial', '')}
+            elif dev_type == 'keithley':
+                result['keithley_smu'] = {'connection': info.get('resource', ''),
+                                           'serial': info.get('serial', '')}
+        return result
+
+
+
 class StartupDialog(QDialog):
     """Main startup dialog for procedure and hardware configuration."""
     
@@ -695,6 +1096,7 @@ class StartupDialog(QDialog):
         self.connection_parameters = {}
         self.connection_test_thread = None
         self.saved_connections = {}
+        self.gss_scan_widget = None    # GSSHardwareScanWidget shown when GSS selected
         self._captured_device_ids = {}  # Populated by connection tests; keyed by device_type
         
         self.setWindowTitle("ZE / APS Measurement Setup")
@@ -851,32 +1253,51 @@ class StartupDialog(QDialog):
             log.debug("Removing existing hardware configuration widget")
             self.main_layout.removeWidget(self.hardware_widget)
             self.hardware_widget.deleteLater()
-        
-        # Create new hardware configuration widget
-        log.debug(f"Creating hardware configuration widget for {procedure_class.__name__}")
-        self.hardware_widget = HardwareConfigWidget(procedure_class)
-        self.hardware_widget.test_requested.connect(self._handle_test_request)
-        self.main_layout.insertWidget(self.hardware_widget_index, self.hardware_widget)
-        # Apply any saved connection strings for this procedure
-        try:
-            saved_for_proc = self.saved_connections.get(procedure_class.__name__, {}) if hasattr(self, 'saved_connections') else {}
-            if saved_for_proc:
-                self.hardware_widget.apply_saved_connections(saved_for_proc)
-        except Exception:
-            log.debug('Failed to apply saved connections', exc_info=True)
-        # Apply any saved enabled/disabled states for devices
-        try:
-            saved_enabled_for_proc = self.saved_enabled.get(procedure_class.__name__, {}) if hasattr(self, 'saved_enabled') else {}
-            if saved_enabled_for_proc:
-                self.hardware_widget.apply_enabled_states(saved_enabled_for_proc)
-        except Exception:
-            log.debug('Failed to apply saved enabled states', exc_info=True)
-        
+
+        # Remove existing GSS scan widget (if any)
+        if self.gss_scan_widget is not None:
+            self.main_layout.removeWidget(self.gss_scan_widget)
+            self.gss_scan_widget.deleteLater()
+            self.gss_scan_widget = None
+
+        # Create hardware widget — for GSS use the unified scan widget instead
+        is_gss = getattr(procedure_class, 'internal_name', '') == 'Gate_Switching_Stress'
+        if is_gss:
+            log.debug(f'Creating GSS hardware scan widget for {procedure_class.__name__}')
+            self.hardware_widget = None
+            self.gss_scan_widget = GSSHardwareScanWidget()
+            self.main_layout.insertWidget(self.hardware_widget_index, self.gss_scan_widget)
+            log.debug('GSS hardware scan widget added')
+        else:
+            log.debug(f'Creating hardware configuration widget for {procedure_class.__name__}')
+            self.hardware_widget = HardwareConfigWidget(procedure_class)
+            self.hardware_widget.test_requested.connect(self._handle_test_request)
+            self.main_layout.insertWidget(self.hardware_widget_index, self.hardware_widget)
+            # Apply any saved connection strings for this procedure
+            try:
+                saved_for_proc = self.saved_connections.get(procedure_class.__name__, {}) if hasattr(self, 'saved_connections') else {}
+                if saved_for_proc:
+                    self.hardware_widget.apply_saved_connections(saved_for_proc)
+            except Exception:
+                log.debug('Failed to apply saved connections', exc_info=True)
+            # Apply any saved enabled/disabled states for devices
+            try:
+                saved_enabled_for_proc = self.saved_enabled.get(procedure_class.__name__, {}) if hasattr(self, 'saved_enabled') else {}
+                if saved_enabled_for_proc:
+                    self.hardware_widget.apply_enabled_states(saved_enabled_for_proc)
+            except Exception:
+                log.debug('Failed to apply saved enabled states', exc_info=True)
+
         # Update button states
-        hardware_config = getattr(procedure_class, 'HARDWARE', {})
-        test_all_visible = bool(hardware_config)  # Show if there's any hardware to test
-        self.test_all_btn.setVisible(test_all_visible)
-        log.debug(f"Test all button visibility set to: {test_all_visible}")
+        if is_gss:
+            # GSS scan widget has per-device Test buttons; hide the global test/scan buttons
+            self.test_all_btn.setVisible(False)
+            self.scan_visa_btn.setVisible(False)
+        else:
+            hardware_config = getattr(procedure_class, 'HARDWARE', {})
+            test_all_visible = bool(hardware_config)
+            self.test_all_btn.setVisible(test_all_visible)
+            self.scan_visa_btn.setVisible(True)
     
     def _start_with_tests(self):
         """Run all connection tests, then accept the dialog when they finish."""
@@ -1048,6 +1469,7 @@ class StartupDialog(QDialog):
             # Load saved connections and enabled states FIRST (before restoring procedure)
             self.saved_connections = gui_settings.get('connections', {}) if isinstance(gui_settings, dict) else {}
             self.saved_enabled = gui_settings.get('enabled', {}) if isinstance(gui_settings, dict) else {}
+            self.saved_gss_controllers = gui_settings.get('gss_controllers', {}) if isinstance(gui_settings, dict) else {}
 
             # Restore last selected procedure if present
             # This triggers _on_procedure_changed which uses saved_connections
@@ -1087,15 +1509,21 @@ class StartupDialog(QDialog):
             'connection_parameters': {}
         }
         
-        if self.hardware_widget:
+        if self.gss_scan_widget is not None:
+            # GSS procedure: get all parameters from the unified scan widget
+            config['connection_parameters'] = self.gss_scan_widget.get_connection_parameters()
+            config['connection_parameters']['gss_discovered_devices'] = (
+                self.gss_scan_widget.get_discovered_devices()
+            )
+        elif self.hardware_widget:
             config['connection_parameters'] = self.hardware_widget.get_connection_parameters()
             aux_type = self.hardware_widget._get_active_aux_psu_type()
             if aux_type and aux_type in config['connection_parameters']:
                 aux_params = dict(config['connection_parameters'][aux_type])
                 aux_params.setdefault('type', aux_type)
                 config['connection_parameters']['aux_psu'] = aux_params
-        
-        # Include device IDs captured during connection tests
+
+        # For GSS: include discovered serial devices in connection_parameters
         config['device_ids'] = dict(self._captured_device_ids)
 
         procedure_name = getattr(procedure_instance, 'name', 'Unknown') if procedure_instance else 'None'
@@ -1138,6 +1566,8 @@ class StartupDialog(QDialog):
                             except Exception:
                                 enabled_map[dev_type] = True
                         settings['gui']['enabled'][proc_name] = enabled_map
+                    # (gss_scan_widget has no persistent config to save beyond the TOML)
+                    pass
             except Exception:
                 log.debug('Failed to save per-device connections or enabled states', exc_info=True)
             with open(settings_path, 'w', encoding='utf-8') as f:

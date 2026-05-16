@@ -5,6 +5,15 @@
 		},
 		{
 			"path": "C:/ChibiStudio/workspace_user/APS control software"
+		},
+		{
+			"path": "../../GSS/Python software/TCU lib"
+		},
+		{
+			"path": "C:/ChibiStudio/workspace_user/GSS control software"
+		},
+		{
+			"path": "C:/ChibiStudio/workspace_user/CGG_DIGITAL"
 		}
 	],
 	"settings": {}
