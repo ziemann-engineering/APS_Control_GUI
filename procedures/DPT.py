@@ -59,16 +59,6 @@ class DoublePulseTest(Procedure):
     
     # Hardware Configuration for Startup Dialog
     HARDWARE = {
-        'aps_controller': {
-            'display_name': 'APS Controller',
-            'parameters': {
-                'connection': {
-                    'label': 'Serial Port',
-                    'default': 'COM5',
-                    'placeholder': 'e.g., COM5, /dev/ttyUSB0'
-                }
-            }
-        },
         'nge103_psu': {
             'display_name': 'R&S NGE103 Power Supply (Auxiliary PSU)',
             'parameters': {
@@ -86,6 +76,16 @@ class DoublePulseTest(Procedure):
                     'label': 'VISA Resource',
                     'default': '',
                     'placeholder': 'e.g., USB0::0x0957::0x8B18::INSTR'
+                }
+            }
+        },
+        'aps_controller': {
+            'display_name': 'APS Controller',
+            'parameters': {
+                'connection': {
+                    'label': 'Serial Port',
+                    'default': 'COM5',
+                    'placeholder': 'e.g., COM5, /dev/ttyUSB0'
                 }
             }
         },

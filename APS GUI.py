@@ -744,6 +744,51 @@ class MainWindow(ManagedDockWindow):
         except Exception:
             pass
 
+    # ---- Queue override: pre-apply connection parameters so they appear in CSV ----
+    def queue(self, procedure=None):
+        """Queue a new experiment, pre-applying connection parameters before CSV creation.
+
+        This ensures that connection strings (APS port, Keithley resource, AUX PSU resource)
+        appear correctly in the CSV header rather than showing their default empty values.
+
+        Also auto-resumes the manager if it was left in a paused state after an abort,
+        so the new experiment starts immediately without requiring a manual Resume click.
+        """
+        try:
+            if procedure is None:
+                procedure = self.make_procedure()
+            # Apply connection parameters BEFORE pymeasure creates the Results/CSV file
+            params = getattr(procedure.__class__, '_startup_connection_parameters', None) or {}
+            if not params:
+                params = self.startup_config.get('connection_parameters', {})
+            if params and hasattr(procedure, '_apply_connection_parameters'):
+                procedure.connection_parameters = params
+                procedure._apply_connection_parameters()
+                # Also set the AUX PSU resource on the procedure parameter if present
+                aux_info = params.get('aux_psu', {})
+                aux_res = aux_info.get('connection') or aux_info.get('resource', '')
+                if aux_res and hasattr(procedure, 'aux_psu_resource'):
+                    procedure.aux_psu_resource = aux_res
+                log.info("Pre-applied connection parameters to procedure before CSV creation")
+            # Pre-apply device IDs captured during connection tests
+            device_ids = self.startup_config.get('device_ids', {})
+            if device_ids and hasattr(procedure, '_apply_device_ids'):
+                procedure._apply_device_ids(device_ids)
+                log.info(f"Pre-applied device IDs to procedure: {list(device_ids.keys())}")
+        except Exception:
+            log.debug('Failed to pre-apply connection parameters in queue()', exc_info=True)
+        super().queue(procedure)
+        # If the manager is paused after an abort, auto-resume so the new experiment
+        # starts immediately without the user needing to click Resume.
+        try:
+            if (hasattr(self, 'abort_button')
+                    and self.abort_button.text() == "Resume"
+                    and self.manager.experiments.has_next()):
+                log.info("Auto-resuming manager after queue (post-abort state)")
+                self.resume()
+        except Exception:
+            log.debug('Failed to auto-resume after queue', exc_info=True)
+
 
 if __name__ == "__main__":
     app = QtWidgets.QApplication(sys.argv)

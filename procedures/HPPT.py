@@ -22,6 +22,12 @@ class HighPowerPulseTest(Procedure):
     # APS connection parameters
     aps_port = Parameter('APS Serial Port', default='COM0')
     keithley_resource = Parameter('Keithley SMU Resource', default='')
+    aux_psu_resource = Parameter('AUX PSU Resource', default='')
+
+    # Device identification strings (populated from connection tests or startup)
+    aps_id = Parameter('APS Firmware Info', default='')
+    keithley_id = Parameter('Keithley SMU ID', default='')
+    aux_psu_id = Parameter('AUX PSU ID', default='')
     
     # HPPT test parameters (from firmware: voltage_v, on_time_ns, period_s, pulse_count, measurement)
     test_voltage = FloatParameter('Test Voltage', units='V', default=100.0, 
@@ -69,26 +75,6 @@ class HighPowerPulseTest(Procedure):
     
     # Hardware Configuration for Startup Dialog
     HARDWARE = {
-        'aps_controller': {
-            'display_name': 'APS Controller',
-            'parameters': {
-                'connection': {
-                    'label': 'Serial Port',
-                    'default': 'COM5',
-                    'placeholder': 'e.g., COM5, /dev/ttyUSB0'
-                }
-            }
-        },
-        'keithley_smu': {
-            'display_name': 'Keithley SMU',
-            'parameters': {
-                'connection': {
-                    'label': 'VISA Resource',
-                    'default': 'GPIB::24',
-                    'placeholder': 'e.g., GPIB::24'
-                }
-            }
-        },
         'nge103_psu': {
             'display_name': 'R&S NGE103 Power Supply (Auxiliary PSU)',
             'parameters': {
@@ -106,6 +92,26 @@ class HighPowerPulseTest(Procedure):
                     'label': 'VISA Resource',
                     'default': '',
                     'placeholder': 'e.g., USB0::0x0957::0x8B18::INSTR'
+                }
+            }
+        },
+        'aps_controller': {
+            'display_name': 'APS Controller',
+            'parameters': {
+                'connection': {
+                    'label': 'Serial Port',
+                    'default': 'COM5',
+                    'placeholder': 'e.g., COM5, /dev/ttyUSB0'
+                }
+            }
+        },
+        'keithley_smu': {
+            'display_name': 'Keithley SMU',
+            'parameters': {
+                'connection': {
+                    'label': 'VISA Resource',
+                    'default': 'GPIB::24',
+                    'placeholder': 'e.g., GPIB::24'
                 }
             }
         },
@@ -152,6 +158,15 @@ class HighPowerPulseTest(Procedure):
                 if controller and controller.connect():
                     self.aux_psu = controller
                     log.info(f'Connected to auxiliary PSU ({self.aux_psu_type}) on {aux_resource}')
+                    # Capture IDN
+                    try:
+                        if not self.aux_psu_id:
+                            if hasattr(controller, 'ID'):
+                                self.aux_psu_id = controller.ID()
+                            elif hasattr(controller, 'psu') and controller.psu:
+                                self.aux_psu_id = controller.psu.query('*IDN?').strip()
+                    except Exception:
+                        pass
                     self._configure_aux_psu_channels()
                 else:
                     log.error('Failed to connect to auxiliary PSU')
@@ -170,6 +185,15 @@ class HighPowerPulseTest(Procedure):
                 self.aps = APSController(self.aps_port)
                 if self.aps.connect():
                     log.info(f'Connected to APS controller on {self.aps_port}')
+                    # Capture firmware info
+                    try:
+                        info_data = self.aps.info(print_response=False)
+                        if info_data and not self.aps_id:
+                            board = info_data.get('Board', info_data.get('board', ''))
+                            build_time = info_data.get('Build time', info_data.get('build_time', ''))
+                            self.aps_id = f"{board}, Built: {build_time}".strip(', ')
+                    except Exception:
+                        pass
                     
                     # Check if system is safe
                     if not self.aps.is_safe():
@@ -193,6 +217,12 @@ class HighPowerPulseTest(Procedure):
                 from pymeasure.instruments.keithley import Keithley2400
                 self.keithley = Keithley2400(self.keithley_resource)
                 log.info(f'Connected to Keithley SMU on {self.keithley_resource}')
+                # Capture IDN
+                try:
+                    if not self.keithley_id:
+                        self.keithley_id = self.keithley.id
+                except Exception:
+                    pass
                 self.keithley.reset()
                 self.keithley.line_frequency = 50
                 self.keithley.wires = 2
@@ -202,7 +232,15 @@ class HighPowerPulseTest(Procedure):
                 self.keithley.compliance_current = 0.1  # 0.1A compliance
                 self.keithley.disable_source()  # Start with output disabled
             except Exception as e:
-                log.exception(f'Error initializing Keithley SMU: {e}')
+                err_str = str(e)
+                # gpib_ctypes raises GpibError "dev() error: Errno 0" when no GPIB hardware is
+                # present.  That is a normal "device not found" situation when running without
+                # instruments, so log it as a warning (no traceback) rather than an exception.
+                if 'dev()' in err_str or 'GpibError' in type(e).__name__:
+                    log.warning(f'Keithley SMU not found on {self.keithley_resource} '
+                                f'(GPIB device not present) — current measurements will be skipped')
+                else:
+                    log.exception(f'Error initializing Keithley SMU: {e}')
                 self.keithley = None
 
         if self.aps is None:
@@ -234,6 +272,27 @@ class HighPowerPulseTest(Procedure):
             keithley_res = keithley_params.get('connection') or keithley_params.get('resource')
             if keithley_res:
                 self.keithley_resource = keithley_res
+
+        # AUX PSU resource (for CSV traceability)
+        aux_info = params.get('aux_psu', {})
+        if isinstance(aux_info, dict):
+            aux_res = aux_info.get('connection') or aux_info.get('resource', '')
+            if aux_res:
+                self.aux_psu_resource = aux_res
+
+    def _apply_device_ids(self, device_ids):
+        """Apply device ID strings from connection tests to procedure parameters."""
+        if not isinstance(device_ids, dict):
+            return
+        if device_ids.get('aps_controller'):
+            self.aps_id = device_ids['aps_controller']
+        if device_ids.get('keithley_smu'):
+            self.keithley_id = device_ids['keithley_smu']
+        # Accept either active aux PSU type
+        for key in ('aux_psu', 'nge103_psu', 'hmc8043_psu'):
+            if device_ids.get(key):
+                self.aux_psu_id = device_ids[key]
+                break
 
     def _get_aux_psu_configuration(self):
         """Get AUX PSU type and resource from connection_parameters."""
@@ -490,52 +549,148 @@ class HighPowerPulseTest(Procedure):
             self._disable_aux_psu_measurement_channels()
 
         except Exception as e:
+            # On any unexpected error: try to stop the APS controller, then cycle AUX PSU Ch1
+            # to reset the DUT power (in case firmware doesn't respond to stop while running).
+            if self.aps is not None:
+                try:
+                    self.aps.stop_test()
+                    log.info('Sent stop_test to APS controller after error')
+                except Exception:
+                    log.debug('stop_test failed or not acknowledged; cycling AUX PSU Ch1 instead')
+                # Always cycle Ch1 to ensure DUT is power-cycled after an error
+                self._cycle_aux_psu_ch1()
             # Ensure measurement channels are disabled even on error
             self._disable_aux_psu_measurement_channels()
             log.exception('Error during HPPT test execution: %s', e)
 
+    def _reinitialize_keithley(self) -> bool:
+        """Close and reopen the Keithley VISA session to recover from persistent VI_ERROR_SYSTEM_ERROR.
+
+        VI_ERROR_SYSTEM_ERROR (-1073807360) can repeat many times in a row when the NI-VISA
+        session itself becomes corrupted (e.g. after a USB-GPIB adapter mini-disconnect caused
+        by EMI from HV pulses, or after the GPIB bus gets stuck).  A plain retry on the same
+        resource object will always fail in that case.  This method:
+          1. Sends a GPIB Device Clear (viClear / SDC) to the instrument to wake it if it is
+             stuck in a trigger-wait state.
+          2. Closes the existing VISA session so NI-VISA releases its internal state.
+          3. Waits 1 s for the NI-488.2 driver and USB adapter to settle.
+          4. Opens a fresh VISA session and reconfigures the instrument.
+
+        Returns True if the new session is working, False otherwise (self.keithley is set to
+        None in that case so further measurement attempts are skipped for the rest of the run).
+        """
+        log.warning('Keithley VI_ERROR_SYSTEM_ERROR persisted across retries — '
+                    'reinitializing VISA session to recover')
+
+        # Step 1: GPIB Device Clear on the existing (possibly broken) connection.
+        # This resets the instrument's input/output buffers and aborts any pending operation.
+        try:
+            self.keithley.adapter.connection.clear()
+            log.debug('Keithley GPIB Device Clear sent')
+            time.sleep(0.2)
+        except Exception as e:
+            log.debug(f'GPIB Device Clear skipped (session already corrupt): {e}')
+
+        # Step 2: Close the existing VISA session.
+        try:
+            self.keithley.adapter.connection.close()
+            log.debug('Keithley VISA session closed')
+        except Exception as e:
+            log.debug(f'Error closing Keithley VISA session (ignoring): {e}')
+
+        self.keithley = None
+
+        # Step 3: Wait for NI-VISA / USB adapter to fully reset.
+        time.sleep(1.0)
+
+        # Step 4: Open a fresh session and reconfigure.
+        try:
+            from pymeasure.instruments.keithley import Keithley2400
+            self.keithley = Keithley2400(self.keithley_resource)
+            self.keithley.reset()
+            self.keithley.line_frequency = 50
+            self.keithley.wires = 2
+            self.keithley.use_front_terminals()
+            self.keithley.measure_current(nplc=10, current=0.1, auto_range=True)
+            self.keithley.compliance_current = 0.1
+            self.keithley.disable_source()
+            log.info('Keithley VISA session reinitialized successfully')
+            return True
+        except Exception as e:
+            log.error(f'Keithley VISA reinitialization failed — current measurements will be '
+                      f'skipped for the rest of this run: {e}')
+            self.keithley = None
+            return False
+
     def _measure_current_with_keithley(self):
         """Perform current measurement with Keithley SMU.
-        
+
+        Uses an escalating recovery strategy for VI_ERROR_SYSTEM_ERROR (-1073807360):
+          Attempt 1 — normal measurement.
+          Attempt 2 — 0.5 s wait, then retry (handles genuine single-shot transients).
+          Attempt 3 — full VISA session teardown + rebuild via _reinitialize_keithley(),
+                      then one final attempt.
+
+        VI_ERROR_SYSTEM_ERROR often repeats several times in a row because the NI-VISA
+        session object itself is in a bad state after the first failure.  Simply retrying
+        on the same session cannot fix that; a fresh VISA open_resource() call is required.
+
         Returns:
-            Measured current in Amperes, or NaN if measurement failed
+            Measured current in Amperes, or NaN if all recovery attempts failed.
         """
         if self.keithley is None:
             log.warning('No Keithley SMU available for current measurement')
             return float('nan')
 
-        try:
-            log.info(f'Enabling Keithley SMU output at {self.measurement_voltage}V for current measurement')
-
-            # Set voltage and enable output
-            self.keithley.source_voltage = self.measurement_voltage
-            self.keithley.enable_source()
-            
-            # Wait for settling
-            time.sleep(0.01)
-            
-            # Measure current
-            current = self.keithley.current
-            log.info(f'Measured current: {current*1e6:.6f} uA')
-            
-            # Disable output
-            self.keithley.disable_source()
-            self.keithley.source_voltage = 0
-            
-            return float(current)
-            
-        except Exception as e:
-            log.error(f'Error during Keithley current measurement: {e}')
-            
-            # Ensure output is disabled even on error
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
             try:
-                if self.keithley:
+                log.info(f'Enabling Keithley SMU output at {self.measurement_voltage}V for current measurement'
+                         + (f' (attempt {attempt}/{max_attempts})' if attempt > 1 else ''))
+
+                self.keithley.source_voltage = self.measurement_voltage
+                self.keithley.enable_source()
+                time.sleep(0.01)
+                current = self.keithley.current
+                log.info(f'Measured current: {current*1e6:.6f} uA')
+                self.keithley.disable_source()
+                self.keithley.source_voltage = 0
+                return float(current)
+
+            except Exception as e:
+                err_str = str(e)
+                is_visa_system_error = (
+                    'VI_ERROR_SYSTEM_ERROR' in err_str
+                    or '-1073807360' in err_str
+                    or 'system error' in err_str.lower()
+                )
+
+                # Always try to disable the source before any recovery step.
+                try:
                     self.keithley.disable_source()
                     self.keithley.source_voltage = 0
-            except Exception:
-                pass
-                
-            return float('nan')
+                except Exception:
+                    pass
+
+                if not is_visa_system_error or attempt == max_attempts:
+                    log.error(f'Error during Keithley current measurement: {e}')
+                    return float('nan')
+
+                if attempt == 1:
+                    # Possibly a genuine one-off transient — simple wait and retry.
+                    log.warning(f'Keithley VI_ERROR_SYSTEM_ERROR on attempt {attempt}; '
+                                f'waiting 0.5 s before retry: {e}')
+                    time.sleep(0.5)
+
+                elif attempt == 2:
+                    # Still failing — the VISA session is likely corrupt.  Rebuild it.
+                    log.warning(f'Keithley VI_ERROR_SYSTEM_ERROR still present after retry (attempt {attempt}): {e}')
+                    if not self._reinitialize_keithley():
+                        # Reinit failed; no point attempting a third measurement.
+                        return float('nan')
+                    time.sleep(0.5)
+
+        return float('nan')
 
     def shutdown(self):
         """Clean shutdown - stop any running tests and disconnect from all instruments."""

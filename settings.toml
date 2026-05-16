@@ -2,8 +2,8 @@
 last_procedure = "HighPowerPulseTest"
 
 [window]
-geometry = "AdnQywADAAAAAAHMAAAAeAAABbMAAAOXAAABzAAAAHgAAAWzAAADlwAAAAAAAAAAB4AAAAHMAAAAeAAABbMAAAOX"
-state = "AAAA/wAAAAD9AAAAAQAAAAAAAAGeAAADIPwCAAAAAfsAAAAgAEkAbgBwAHUAdABfAFAAYQByAGEAbQBlAHQAZQByAHMBAAAAAAAAAyAAAAKKAP///wAAAkYAAAMgAAAABAAAAAQAAAAIAAAACPwAAAAA"
+geometry = "AdnQywADAAAAAAAAAAAAHQAADv8AAAgzAAAHKAAAArQAAAtWAAAGDgAAAAACAAAADwAAAAAAAAAAHQAADv8AAAgz"
+state = "AAAA/wAAAAD9AAAAAQAAAAAAAAGeAAAIF/wCAAAAAfsAAAAgAEkAbgBwAHUAdABfAFAAYQByAGEAbQBlAHQAZQByAHMBAAAAAAAACBcAAALvAP///wAADV0AAAgXAAAABAAAAAQAAAAIAAAACPwAAAAA"
 
 [directories]
 Random_Number_Test = "e:\\Projekte\\Ziemann Engineering\\Projekte\\rSCT\\Python Software\\data\\Random"
@@ -12,14 +12,27 @@ Double_Pulse_Test = "e:\\Projekte\\Ziemann Engineering\\Projekte\\HPPT2\\Python 
 
 [docks]
 Random_Number_Test = "json:{\"main\": [\"vertical\", [[\"dock\", \"Dock 1\", {}], [\"dock\", \"Dock 2\", {}]], {\"sizes\": [163, 163]}], \"float\": []}"
-High_Power_Pulse_Test = "json:{\"main\": [\"vertical\", [[\"dock\", \"Dock 1\", {}]], {\"sizes\": [338]}], \"float\": []}"
+High_Power_Pulse_Test = "json:{\"main\": [\"vertical\", [[\"dock\", \"Dock 1\", {}]], {\"sizes\": [950]}], \"float\": []}"
 Double_Pulse_Test = "json:{\"main\": [\"vertical\", [[\"dock\", \"Dock 1\", {}], [\"dock\", \"Dock 2\", {}]], {\"sizes\": [158, 175]}], \"float\": []}"
 
+[parameters.High_Power_Pulse_Test]
+test_voltage = 100.0
+dut_on_time = 100
+pulse_period = 1.0
+pulse_count = 1000
+gate_measurement = true
+measurement_voltage = 20.0
+wait_for_completion = true
+aux_psu_ch1 = "24.0, 0.5"
+aux_psu_ch2 = "5.0, 0.1"
+aux_psu_ch3 = "15.0, 0.1"
+timeout = 300.0
+
 [gui.enabled.HighPowerPulseTest]
-aps_controller = true
-keithley_smu = true
 nge103_psu = true
 hmc8043_psu = false
+aps_controller = true
+keithley_smu = true
 keysight_oscilloscope = true
 
 [gui.enabled.RandomProcedure]
@@ -35,17 +48,17 @@ connection = ""
 [gui.connections.DoublePulseTest.keysight_oscilloscope]
 connection = "USB0::0x2A8D::0x904A::MY58150189::INSTR"
 
-[gui.connections.HighPowerPulseTest.aps_controller]
-connection = "COM8"
-
-[gui.connections.HighPowerPulseTest.keithley_smu]
-connection = "GPIB::24"
-
 [gui.connections.HighPowerPulseTest.nge103_psu]
 connection = ""
 
 [gui.connections.HighPowerPulseTest.hmc8043_psu]
 connection = ""
+
+[gui.connections.HighPowerPulseTest.aps_controller]
+connection = "COM8"
+
+[gui.connections.HighPowerPulseTest.keithley_smu]
+connection = "GPIB::24"
 
 [gui.connections.HighPowerPulseTest.keysight_oscilloscope]
 connection = "USB0::0x2A8D::0x904A::MY58150189::INST"

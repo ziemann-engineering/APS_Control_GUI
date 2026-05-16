@@ -78,6 +78,7 @@ class ConnectionTestThread(QThread):
     """Thread for testing hardware connections without blocking the UI."""
     
     connection_result = pyqtSignal(str, bool, str)  # device_name, success, message
+    device_id_captured = pyqtSignal(str, str)  # device_type, id_string (emitted on successful connect)
     
     def __init__(self, device_type, connection_params):
         super().__init__()
@@ -120,6 +121,32 @@ class ConnectionTestThread(QThread):
         if not port:
             port = 'COM3'
         log.info(f"Testing APS controller connection on port: {port}")
+
+        # Optionally enable AUX PSU CH1 before testing
+        aux_resource = self.connection_params.get('_enable_aux_psu_ch1', '')
+        aux_type = self.connection_params.get('_aux_psu_type', 'nge103_psu')
+        if aux_resource:
+            log.info(f"Enabling AUX PSU CH1 on {aux_resource} ({aux_type}) before APS test")
+            try:
+                self._ensure_project_path()
+                if aux_type == 'hmc8043_psu':
+                    from hardware.rs_hmc8043 import RSHMC8043Controller
+                    aux_ctrl = RSHMC8043Controller(aux_resource)
+                else:
+                    from hardware.rs_nge103 import NGE100
+                    aux_ctrl = NGE100(aux_resource)
+                if aux_ctrl.connect():
+                    aux_ctrl.set_voltage(1, 24.0)
+                    aux_ctrl.set_current(1, 0.5)
+                    aux_ctrl.enable_output(1, True)
+                    log.info("AUX PSU CH1 enabled: 24V / 0.5A")
+                    import time as _time
+                    _time.sleep(0.5)  # Let power stabilise
+                else:
+                    log.warning("Failed to connect to AUX PSU for CH1 enable")
+            except Exception as e:
+                log.error(f"Error enabling AUX PSU CH1: {e}")
+
         try:
             self._ensure_project_path()
             from hardware.APS_controller import APSController
@@ -128,12 +155,24 @@ class ConnectionTestThread(QThread):
             log.debug(f"Created APS controller instance for port {port}")
             if aps.connect():
                 log.info(f"APS controller successfully connected on {port}")
+                aps_id_str = ''
+                try:
+                    info_data = aps.info(print_response=False)
+                    if info_data:
+                        board = info_data.get('Board', info_data.get('board', ''))
+                        build_time = info_data.get('Build time', info_data.get('build_time', ''))
+                        aps_id_str = f"{board}, Built: {build_time}".strip(', ')
+                except Exception:
+                    pass
+                if aps_id_str:
+                    self.device_id_captured.emit('aps_controller', aps_id_str)
                 disconnect_method = getattr(aps, 'disconnect', None) or getattr(aps, 'close', None)
                 if callable(disconnect_method):
                     disconnect_method()
                     log.debug(f"APS controller disconnected from {port}")
                 self.connection_result.emit(
-                    "APS Controller", True, f"Connected on {port}"
+                    "APS Controller", True,
+                    f"Connected on {port}" + (f": {aps_id_str}" if aps_id_str else "")
                 )
             else:
                 log.warning(f"APS controller failed to connect on {port}")
@@ -173,6 +212,7 @@ class ConnectionTestThread(QThread):
             idn = instrument.id
             log.info(f"Keithley SMU successfully connected: {idn}")
             instrument.shutdown()
+            self.device_id_captured.emit('keithley_smu', idn)
             self.connection_result.emit(
                 "Keithley SMU", True, f"Connected: {idn}"
             )
@@ -214,6 +254,7 @@ class ConnectionTestThread(QThread):
                 if callable(disconnect_method):
                     disconnect_method()
                     log.debug(f"NGE103 PSU disconnected from {resource}")
+                self.device_id_captured.emit('nge103_psu', idn)
                 self.connection_result.emit(
                     "NGE103 PSU", True, f"Connected: {idn}"
                 )
@@ -252,7 +293,7 @@ class ConnectionTestThread(QThread):
                 if callable(disconnect_method):
                     disconnect_method()
                 log.debug(f"Keysight oscilloscope disconnected from {resource}")
-                log.debug(f"Keysight oscilloscope disconnected from {resource}")
+                self.device_id_captured.emit('keysight_oscilloscope', idn)
                 self.connection_result.emit(
                     "Keysight Oscilloscope", True, f"Connected: {idn}"
                 )
@@ -287,6 +328,7 @@ class ConnectionTestThread(QThread):
                 idn = controller.psu.query('*IDN?').strip() if controller.psu else "Unknown"
                 log.info(f"HMC8043 PSU successfully connected: {idn}")
                 controller.disconnect()
+                self.device_id_captured.emit('hmc8043_psu', idn)
                 self.connection_result.emit(
                     "R&S HMC8043 Power Supply", True, f"Connected: {idn}"
                 )
@@ -538,6 +580,30 @@ class HardwareConfigWidget(QGroupBox):
         
         log.debug(f"{device_type} test parameters: {params}")
 
+        # For APS controller: ask user whether to enable AUX PSU CH1 first
+        if device_type == 'aps_controller':
+            active_aux = self._get_active_aux_psu_type()
+            aux_connection = ''
+            if active_aux:
+                aux_widgets = self.connection_widgets.get(active_aux, {})
+                conn_widget = aux_widgets.get('connection')
+                if conn_widget:
+                    aux_connection = (conn_widget.currentText() if hasattr(conn_widget, 'currentText')
+                                      else conn_widget.text())
+            reply = QMessageBox.question(
+                self.parent() or self,
+                "Enable AUX PSU CH1?",
+                "Enable 24 V / 0.5 A on CH1 of the selected AUX PSU before testing the APS connection?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes
+            )
+            if reply == QMessageBox.Yes and aux_connection:
+                params['_enable_aux_psu_ch1'] = aux_connection
+                params['_aux_psu_type'] = active_aux or 'nge103_psu'
+                log.info(f"Will enable AUX PSU CH1 on {aux_connection} before APS test")
+            else:
+                log.info("Skipping AUX PSU CH1 activation before APS test")
+
         # Disable test button and show testing status
         self.test_buttons[device_type].setEnabled(False)
         self.status_labels[device_type].setText("Testing connection...")
@@ -629,6 +695,7 @@ class StartupDialog(QDialog):
         self.connection_parameters = {}
         self.connection_test_thread = None
         self.saved_connections = {}
+        self._captured_device_ids = {}  # Populated by connection tests; keyed by device_type
         
         self.setWindowTitle("ZE / APS Measurement Setup")
         self.setWindowIcon(QIcon('ZE.png'))
@@ -726,7 +793,7 @@ class StartupDialog(QDialog):
 
         self.start_btn = QPushButton("Start Measurement System")
         self.start_btn.setDefault(True)
-        self.start_btn.clicked.connect(self.accept)
+        self.start_btn.clicked.connect(self._start_with_tests)
         self.start_btn.setMinimumHeight(35)
         self.start_btn.setMinimumWidth(150)
         button_layout.addWidget(self.start_btn)
@@ -811,6 +878,20 @@ class StartupDialog(QDialog):
         self.test_all_btn.setVisible(test_all_visible)
         log.debug(f"Test all button visibility set to: {test_all_visible}")
     
+    def _start_with_tests(self):
+        """Run all connection tests, then accept the dialog when they finish."""
+        log.info("Start clicked — running connection tests before accepting")
+        self._accept_after_tests = True
+        self.start_btn.setEnabled(False)
+        self.start_btn.setText("Testing connections…")
+        self._test_all_connections()
+        # If there were no enabled devices to test, the queue is already empty —
+        # accept immediately in that case.
+        if not getattr(self, '_test_queue', []) and (
+                self.connection_test_thread is None
+                or not self.connection_test_thread.isRunning()):
+            self.accept()
+
     def _handle_test_request(self, device_type, params):
         """Handle hardware connection test request."""
         if self.connection_test_thread and self.connection_test_thread.isRunning():
@@ -818,8 +899,14 @@ class StartupDialog(QDialog):
         
         self.connection_test_thread = ConnectionTestThread(device_type, params)
         self.connection_test_thread.connection_result.connect(self._handle_test_result)
+        self.connection_test_thread.device_id_captured.connect(self._store_device_id)
         self.connection_test_thread.start()
     
+    def _store_device_id(self, device_type, id_string):
+        """Store a device ID captured during a connection test."""
+        self._captured_device_ids[device_type] = id_string
+        log.debug(f"Stored device ID for {device_type}: {id_string}")
+
     def _handle_test_result(self, device_name, success, message):
         """Handle connection test result."""
         if self.hardware_widget:
@@ -831,6 +918,11 @@ class StartupDialog(QDialog):
     def _process_test_queue(self):
         """Process the next test in the queue."""
         if not hasattr(self, '_test_queue') or not self._test_queue:
+            # Queue exhausted — accept the dialog if start was clicked
+            if getattr(self, '_accept_after_tests', False):
+                self._accept_after_tests = False
+                log.info("All connection tests finished — accepting startup dialog")
+                self.accept()
             return
         
         # Check if a test is still running
@@ -1003,9 +1095,13 @@ class StartupDialog(QDialog):
                 aux_params.setdefault('type', aux_type)
                 config['connection_parameters']['aux_psu'] = aux_params
         
+        # Include device IDs captured during connection tests
+        config['device_ids'] = dict(self._captured_device_ids)
+
         procedure_name = getattr(procedure_instance, 'name', 'Unknown') if procedure_instance else 'None'
         log.info(f"Final configuration: procedure={procedure_name}, "
-                f"connections={list(config['connection_parameters'].keys())}")
+                f"connections={list(config['connection_parameters'].keys())}, "
+                f"device_ids captured: {list(config['device_ids'].keys())}")
 
         # Persist the last selected procedure to settings.toml so it can be restored
         try:
