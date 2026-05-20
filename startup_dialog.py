@@ -1162,8 +1162,11 @@ def find_incomplete_gss_sessions() -> list:
 
             # Skip sessions whose process is still running
             pid = session.get('pid')
-            if pid and _is_process_running(int(pid)):
-                continue
+            try:
+                if pid is not None and _is_process_running(int(pid)):
+                    continue
+            except (ValueError, TypeError):
+                pass  # malformed PID — treat as not running
 
             session['_sentinel_path'] = str(sentinel_file)
             sessions.append(session)
@@ -1211,10 +1214,11 @@ class _GSSRecoveryCopyThread(QThread):
                     errors.append(f'{csv_file.name}: {exc}')
 
         if errors:
+            extra = f'\n… and {len(errors) - 5} more error(s)' if len(errors) > 5 else ''
             self.finished.emit(
                 False,
                 f'Copied {copied} file(s) with {len(errors)} error(s):\n'
-                + '\n'.join(errors[:5]),
+                + '\n'.join(errors[:5]) + extra,
             )
         else:
             self.finished.emit(True, f'Successfully copied {copied} file(s).')
