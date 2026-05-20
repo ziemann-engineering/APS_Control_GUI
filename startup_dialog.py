@@ -10,6 +10,7 @@ This dialog allows users to:
 import json
 import logging
 import os
+import shutil
 import sys
 import time
 import importlib
@@ -1085,6 +1086,356 @@ class GSSHardwareScanWidget(QGroupBox):
         return result
 
 
+# ---------------------------------------------------------------------------
+# GSS crash-recovery helpers
+# ---------------------------------------------------------------------------
+
+def _is_process_running(pid: int) -> bool:
+    """Return True if a process with the given PID is currently running.
+
+    Works on both Windows and Unix without requiring psutil.
+    """
+    if pid <= 0:
+        return False
+    if os.name == 'nt':  # Windows
+        import ctypes
+        PROCESS_QUERY_INFORMATION = 0x0400
+        handle = ctypes.windll.kernel32.OpenProcess(
+            PROCESS_QUERY_INFORMATION, False, pid
+        )
+        if handle:
+            ctypes.windll.kernel32.CloseHandle(handle)
+            return True
+        return False
+    else:  # Unix / Linux / macOS
+        try:
+            os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            # Process exists but belongs to another user
+            return True
+
+
+def find_incomplete_gss_sessions() -> list:
+    """Scan known GSS data directories for orphaned session sentinel files.
+
+    Returns a list of session dicts loaded from ``gss_session_*.json`` files
+    where the owning process is no longer running (i.e. likely crashed).
+    Each dict is the raw JSON content plus an extra ``'_sentinel_path'`` key
+    with the absolute path of the sentinel file.
+    """
+    settings_path = Path(__file__).parent / 'settings.toml'
+    search_dirs: list = []
+
+    # Read the configured GSS data directory from settings.toml
+    try:
+        if settings_path.exists():
+            with open(settings_path, 'r', encoding='utf-8') as f:
+                settings = toml.load(f) or {}
+            gss_dir = settings.get('directories', {}).get('Gate_Switching_Stress', '')
+            if gss_dir:
+                search_dirs.append(Path(gss_dir))
+    except Exception:
+        pass
+
+    # Also check the default data/GSS location
+    default_gss = Path(__file__).parent / 'data' / 'GSS'
+    if default_gss not in search_dirs:
+        search_dirs.append(default_gss)
+
+    sessions = []
+    for search_dir in search_dirs:
+        if not search_dir.exists():
+            continue
+        for sentinel_file in sorted(search_dir.glob('gss_session_*.json')):
+            try:
+                with open(sentinel_file, 'r', encoding='utf-8') as f:
+                    session = json.load(f)
+            except Exception:
+                continue
+
+            # Skip sessions explicitly marked completed
+            if session.get('completed', False):
+                continue
+
+            # Skip sessions whose process is still running
+            pid = session.get('pid')
+            if pid and _is_process_running(int(pid)):
+                continue
+
+            session['_sentinel_path'] = str(sentinel_file)
+            sessions.append(session)
+
+    return sessions
+
+
+class _GSSRecoveryCopyThread(QThread):
+    """Background thread that copies CSVs from a local cache dir to destinations."""
+
+    progress = pyqtSignal(str)       # status message
+    finished = pyqtSignal(bool, str) # (success, message)
+
+    def __init__(self, local_cache_dir: str, destinations: list, parent=None):
+        super().__init__(parent)
+        self.local_cache_dir = local_cache_dir
+        self.destinations = destinations
+
+    def run(self):
+        cache = Path(self.local_cache_dir)
+        if not cache.exists():
+            self.finished.emit(False, f'Cache directory not found:\n{self.local_cache_dir}')
+            return
+
+        csv_files = list(cache.glob('*.csv'))
+        if not csv_files:
+            self.finished.emit(False, 'No CSV files found in cache directory.')
+            return
+
+        copied = 0
+        errors = []
+        for dest_str in self.destinations:
+            dest = Path(dest_str)
+            try:
+                dest.mkdir(parents=True, exist_ok=True)
+            except Exception as exc:
+                errors.append(f'Cannot create {dest}: {exc}')
+                continue
+            for csv_file in csv_files:
+                self.progress.emit(f'Copying {csv_file.name} → {dest}…')
+                try:
+                    shutil.copy2(csv_file, dest / csv_file.name)
+                    copied += 1
+                except Exception as exc:
+                    errors.append(f'{csv_file.name}: {exc}')
+
+        if errors:
+            self.finished.emit(
+                False,
+                f'Copied {copied} file(s) with {len(errors)} error(s):\n'
+                + '\n'.join(errors[:5]),
+            )
+        else:
+            self.finished.emit(True, f'Successfully copied {copied} file(s).')
+
+
+class GSSRecoveryDialog(QDialog):
+    """Modal dialog shown on startup when unsynced GSS sessions are detected.
+
+    Lets the user recover (copy CSVs to the data/NAS directories), skip, or
+    delete each orphaned session.
+    """
+
+    def __init__(self, sessions: list, parent=None):
+        super().__init__(parent)
+        self._sessions = sessions
+        self._copy_thread = None
+        self.setWindowTitle('GSS Data Recovery')
+        self.setModal(True)
+        self.resize(820, 480)
+        self._setup_ui()
+
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+
+        # Header
+        header_lbl = QLabel(
+            '<b>Unsynced GSS data found</b><br>'
+            'The software may have crashed during a previous stress test. '
+            'The following local data files were not fully copied to the data directory. '
+            'Select an action for each session.'
+        )
+        header_lbl.setWordWrap(True)
+        header_lbl.setStyleSheet('padding: 8px; background: #fff3cd; border: 1px solid #ffc107; border-radius: 4px;')
+        layout.addWidget(header_lbl)
+
+        # Table
+        self._table = QTableWidget(len(self._sessions), 6)
+        self._table.setHorizontalHeaderLabels([
+            'Controllers', 'Started', 'Last Synced', 'Cache Dir', 'CSV Size', 'Actions',
+        ])
+        self._table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
+        self._table.setSelectionMode(QAbstractItemView.NoSelection)
+        self._table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._table.verticalHeader().setVisible(False)
+
+        self._recover_btns = []
+        self._skip_btns = []
+        self._delete_btns = []
+
+        for row, session in enumerate(self._sessions):
+            controllers = ', '.join(session.get('controllers', [])) or '—'
+            started = session.get('started_at', '—')
+            last_sync = session.get('last_synced_at') or 'Never'
+            cache_dir = session.get('local_cache_dir', '')
+            csv_size = self._compute_csv_size(cache_dir)
+
+            self._table.setItem(row, 0, QTableWidgetItem(controllers))
+            self._table.setItem(row, 1, QTableWidgetItem(started))
+            self._table.setItem(row, 2, QTableWidgetItem(last_sync))
+            self._table.setItem(row, 3, QTableWidgetItem(cache_dir))
+            self._table.setItem(row, 4, QTableWidgetItem(csv_size))
+
+            # Action buttons
+            btn_widget = QFrame()
+            btn_layout = QHBoxLayout(btn_widget)
+            btn_layout.setContentsMargins(2, 2, 2, 2)
+            btn_layout.setSpacing(4)
+
+            recover_btn = QPushButton('Recover')
+            recover_btn.setToolTip('Copy CSV files to the data and NAS directories')
+            recover_btn.setStyleSheet('color: white; background: #27ae60;')
+            recover_btn.clicked.connect(lambda _checked, r=row: self._recover(r))
+
+            skip_btn = QPushButton('Skip')
+            skip_btn.setToolTip('Leave data in place; you can recover it manually later')
+            skip_btn.clicked.connect(lambda _checked, r=row: self._skip(r))
+
+            delete_btn = QPushButton('Delete')
+            delete_btn.setToolTip('Permanently delete this session\'s local cache files')
+            delete_btn.setStyleSheet('color: white; background: #e74c3c;')
+            delete_btn.clicked.connect(lambda _checked, r=row: self._delete(r))
+
+            btn_layout.addWidget(recover_btn)
+            btn_layout.addWidget(skip_btn)
+            btn_layout.addWidget(delete_btn)
+
+            self._recover_btns.append(recover_btn)
+            self._skip_btns.append(skip_btn)
+            self._delete_btns.append(delete_btn)
+
+            self._table.setCellWidget(row, 5, btn_widget)
+
+        self._table.resizeColumnsToContents()
+        self._table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
+        layout.addWidget(self._table)
+
+        # Status label
+        self._status_lbl = QLabel('')
+        self._status_lbl.setWordWrap(True)
+        layout.addWidget(self._status_lbl)
+
+        # Close button
+        close_btn = QPushButton('Close')
+        close_btn.clicked.connect(self.accept)
+        close_layout = QHBoxLayout()
+        close_layout.addStretch()
+        close_layout.addWidget(close_btn)
+        layout.addLayout(close_layout)
+
+    @staticmethod
+    def _compute_csv_size(cache_dir: str) -> str:
+        """Return a human-readable total size of CSV files in *cache_dir*."""
+        try:
+            total = sum(
+                f.stat().st_size
+                for f in Path(cache_dir).glob('*.csv')
+                if f.is_file()
+            )
+            if total < 1024:
+                return f'{total} B'
+            elif total < 1024 ** 2:
+                return f'{total / 1024:.1f} KB'
+            else:
+                return f'{total / 1024 ** 2:.1f} MB'
+        except Exception:
+            return '—'
+
+    def _set_row_enabled(self, row: int, enabled: bool):
+        for btn_list in (self._recover_btns, self._skip_btns, self._delete_btns):
+            try:
+                btn_list[row].setEnabled(enabled)
+            except IndexError:
+                pass
+
+    def _recover(self, row: int):
+        session = self._sessions[row]
+        cache_dir = session.get('local_cache_dir', '')
+        data_dir = session.get('data_directory', '')
+        nas_dir = (session.get('nas_directory') or '').strip()
+
+        destinations = [d for d in [data_dir, nas_dir] if d]
+        if not destinations:
+            QMessageBox.warning(
+                self, 'No Destination',
+                'No data directory or NAS directory is configured for this session.',
+            )
+            return
+
+        self._set_row_enabled(row, False)
+        self._status_lbl.setText(f'Copying data from row {row + 1}…')
+
+        self._copy_thread = _GSSRecoveryCopyThread(cache_dir, destinations, parent=self)
+        self._copy_thread.progress.connect(self._status_lbl.setText)
+        self._copy_thread.finished.connect(
+            lambda ok, msg, r=row, s=session: self._on_copy_done(r, s, ok, msg)
+        )
+        self._copy_thread.start()
+
+    def _on_copy_done(self, row: int, session: dict, ok: bool, message: str):
+        if ok:
+            self._status_lbl.setText(f'Row {row + 1}: {message}')
+            self._status_lbl.setStyleSheet('color: #27ae60;')
+            # Remove the sentinel file so this session won't appear again
+            sentinel = session.get('_sentinel_path', '')
+            if sentinel and os.path.exists(sentinel):
+                try:
+                    os.remove(sentinel)
+                except Exception as exc:
+                    log.warning(f'Could not remove sentinel: {exc}')
+            self._table.setItem(row, 2, QTableWidgetItem('Recovered ✓'))
+            # Disable all action buttons for this row (already done)
+        else:
+            self._status_lbl.setText(f'Row {row + 1}: {message}')
+            self._status_lbl.setStyleSheet('color: #e74c3c;')
+            self._set_row_enabled(row, True)
+
+    def _skip(self, row: int):
+        self._set_row_enabled(row, False)
+        self._table.setItem(row, 2, QTableWidgetItem('Skipped'))
+        self._status_lbl.setText(
+            f'Row {row + 1}: skipped. Data remains in the local cache directory.'
+        )
+        self._status_lbl.setStyleSheet('')
+
+    def _delete(self, row: int):
+        session = self._sessions[row]
+        cache_dir = session.get('local_cache_dir', '')
+        reply = QMessageBox.question(
+            self,
+            'Confirm Delete',
+            f'Permanently delete all files in:\n{cache_dir}\n\nThis cannot be undone.',
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        self._set_row_enabled(row, False)
+        errors = []
+        try:
+            if cache_dir and os.path.isdir(cache_dir):
+                shutil.rmtree(cache_dir, ignore_errors=False)
+        except Exception as exc:
+            errors.append(str(exc))
+
+        sentinel = session.get('_sentinel_path', '')
+        if sentinel and os.path.exists(sentinel):
+            try:
+                os.remove(sentinel)
+            except Exception as exc:
+                errors.append(str(exc))
+
+        if errors:
+            self._status_lbl.setText(f'Delete errors: {"; ".join(errors)}')
+            self._status_lbl.setStyleSheet('color: #e74c3c;')
+            self._set_row_enabled(row, True)
+        else:
+            self._table.setItem(row, 2, QTableWidgetItem('Deleted ✓'))
+            self._status_lbl.setText(f'Row {row + 1}: cache deleted.')
+            self._status_lbl.setStyleSheet('')
+
 
 class StartupDialog(QDialog):
     """Main startup dialog for procedure and hardware configuration."""
@@ -1587,7 +1938,17 @@ def show_startup_dialog():
         app = QApplication(sys.argv)
     else:
         log.debug("Using existing QApplication instance")
-    
+
+    # Check for incomplete GSS sessions before showing the main dialog
+    try:
+        incomplete = find_incomplete_gss_sessions()
+        if incomplete:
+            log.info(f'Found {len(incomplete)} incomplete GSS session(s); showing recovery dialog')
+            recovery = GSSRecoveryDialog(incomplete)
+            recovery.exec_()
+    except Exception:
+        log.debug('GSS recovery check failed', exc_info=True)
+
     dialog = StartupDialog()
     log.info("Showing startup dialog to user")
     
