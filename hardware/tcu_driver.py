@@ -1,9 +1,7 @@
 """
 TCU (Temperature Control Unit) Driver
 
-Thin wrapper around the ZE TCU library located in the sibling 'TCU lib'
-workspace folder.  Adds sys.path manipulation so the library can be
-imported regardless of how the main application is launched.
+Thin wrapper around the ZE TCU library (`hardware/TCU.py`).
 
 Usage
 -----
@@ -19,41 +17,19 @@ Usage
 
 import logging
 import os
-import sys
 import time
 from typing import Optional
 
 log = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Locate and register the TCU lib folder so TCU.py can be imported.
-# We search relative to this file's location (hardware/) and also check
-# the sibling workspace path used in the ZE project structure.
-# ---------------------------------------------------------------------------
-
-_TCU_LIB_SEARCH_PATHS = [
-    # Same repo / workspace – typical ZE project layout
-    os.path.join(
-        os.path.dirname(__file__),          # …/Python Software/hardware/
-        '..', '..', '..', '..', '..', 'GSS', 'Python software', 'TCU lib',
-    ),
-    # Absolute path for the known workspace layout
-    r'e:\Projekte\Ziemann Engineering\Projekte\GSS\Python software\TCU lib',
-]
-
-_tcu_lib_loaded = False
-for _candidate in _TCU_LIB_SEARCH_PATHS:
-    _candidate = os.path.normpath(_candidate)
-    if os.path.isfile(os.path.join(_candidate, 'TCU.py')):
-        if _candidate not in sys.path:
-            sys.path.insert(0, _candidate)
-        _tcu_lib_loaded = True
-        log.debug(f'TCU lib loaded from: {_candidate}')
-        break
-
-if not _tcu_lib_loaded:
+try:
+    from hardware.TCU import TCU as _TCU
+    _tcu_lib_loaded = True
+except ImportError:
+    _TCU = None
+    _tcu_lib_loaded = False
     log.warning(
-        'TCU.py not found in any of the expected locations. '
+        'hardware/TCU.py could not be imported. '
         'TCUDriver.connect() will raise ImportError at runtime.'
     )
 
@@ -90,8 +66,9 @@ class TCUDriver:
         Returns True on success, False on failure.
         """
         try:
-            from TCU import TCU  # imported from the TCU lib path added above
-            self._tcu = TCU(self.port, channels=self.channels, baudrate=self.baudrate)
+            if _TCU is None:
+                raise ImportError('hardware/TCU.py is not available')
+            self._tcu = _TCU(self.port, channels=self.channels, baudrate=self.baudrate)
             log.info(f'TCU connected on {self.port}: {self._tcu.info.strip()}')
             return True
         except ImportError as exc:

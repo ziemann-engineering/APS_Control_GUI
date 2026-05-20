@@ -77,6 +77,8 @@ import logging
 import math
 import os
 import queue
+import shutil
+import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
@@ -659,6 +661,14 @@ class GateStressTest(Procedure):
         'Data Directory',
         default=os.path.join('data', 'GSS'),
     )
+    nas_directory = Parameter(
+        'NAS Directory (optional)',
+        default='',
+    )
+
+    # How often (seconds) local CSV files are copied to the NAS.
+    # Syncs run in a background thread so they never block the stress test.
+    _NAS_SYNC_INTERVAL_S: int = 3600
 
     # ---- Advanced: multi-controller JSON (optional) ----------------------
     # Leave empty to use the individual parameters above.
@@ -704,6 +714,7 @@ class GateStressTest(Procedure):
         'log_interval_s',
         'vth_interval_min',
         'data_directory',
+        'nas_directory',
     ]
     DISPLAYS = INPUTS
 
@@ -761,7 +772,17 @@ class GateStressTest(Procedure):
         """Parse configuration, connect all shared hardware."""
         self._workers: List[GSSWorker] = []
         self._result_queue: queue.Queue = queue.Queue()
-        self._csv_handles: Dict[str, Any] = {}   # ctrl_id → {'file': …, 'writer': …}
+        self._csv_handles: Dict[str, Any] = {}      # ctrl_id → {'file': …, 'writer': …}
+        self._local_csv_paths: Dict[str, str] = {}  # ctrl_id → absolute local path
+
+        # CSVs are written to a local temp directory to avoid blocking on NAS
+        # latency.  Contents are periodically copied to data_directory and
+        # optionally to nas_directory.
+        self._local_cache_dir: str = tempfile.mkdtemp(prefix='gss_cache_')
+        log.info(f'GSS local cache: {self._local_cache_dir}')
+
+        self._last_nas_sync: float = time.monotonic()
+        self._sync_thread: Optional[threading.Thread] = None
 
         self._apply_connection_parameters()
 
@@ -862,7 +883,7 @@ class GateStressTest(Procedure):
                 psu_lock=psu_lock,
                 tcu=tcu,
             )
-            # Open per-controller CSV file
+            # Open per-controller CSV in local cache dir
             self._open_controller_csv(cfg.id, run_ts)
             self._workers.append(worker)
 
@@ -893,6 +914,10 @@ class GateStressTest(Procedure):
                 self.emit('results', row)
                 self._write_controller_csv(row['Controller'], row)
                 drained_any = True
+
+            # Periodic NAS sync (non-blocking background thread)
+            if time.monotonic() - self._last_nas_sync >= self._NAS_SYNC_INTERVAL_S:
+                self._sync_to_nas(final=False)
 
             # Check stop conditions
             if self.should_stop():
@@ -966,6 +991,9 @@ class GateStressTest(Procedure):
                 log.debug(f'Closed CSV for {ctrl_id}')
             except Exception:
                 pass
+
+        # Final sync: copy closed CSVs to data_directory and NAS
+        self._sync_to_nas(final=True)
 
         log.info('GSS shutdown complete')
 
@@ -1252,15 +1280,21 @@ class GateStressTest(Procedure):
     # -----------------------------------------------------------------------
 
     def _open_controller_csv(self, ctrl_id: str, timestamp: str):
-        """Open (and write the header to) the CSV file for *ctrl_id*."""
+        """Open (and write the header to) the CSV file for *ctrl_id*.
+
+        The file is created in the local cache directory to avoid blocking on
+        NAS latency.  It is copied to *data_directory* (and optionally
+        *nas_directory*) by :meth:`_sync_to_nas`.
+        """
         safe_id = ctrl_id.replace(' ', '_').replace('/', '-')
         filename = f'GSS_{safe_id}_{timestamp}.csv'
-        filepath = os.path.join(self.data_directory, filename)
+        filepath = os.path.join(self._local_cache_dir, filename)
         try:
             f = open(filepath, 'w', newline='', encoding='utf-8')
             writer = csv.DictWriter(f, fieldnames=self.DATA_COLUMNS)
             writer.writeheader()
             self._csv_handles[ctrl_id] = {'file': f, 'writer': writer}
+            self._local_csv_paths[ctrl_id] = filepath
             log.info(f'Opened CSV for {ctrl_id}: {filepath}')
         except Exception as exc:
             log.error(f'Cannot open CSV for {ctrl_id}: {exc}')
@@ -1275,3 +1309,62 @@ class GateStressTest(Procedure):
             handle['file'].flush()
         except Exception as exc:
             log.warning(f'CSV write error ({ctrl_id}): {exc}')
+
+    def _sync_to_nas(self, final: bool = False) -> None:
+        """Copy local cache CSVs to *data_directory* and *nas_directory*.
+
+        When *final* is ``False`` the copy runs in a background thread so it
+        never blocks the stress test.  When *final* is ``True`` (called from
+        :meth:`shutdown` after the CSV handles are already closed) the copy
+        runs synchronously so no data is lost on exit.
+
+        A background sync that is still running when a new interval fires is
+        silently skipped — the next interval will catch up.
+        """
+        if not self._local_csv_paths:
+            return
+
+        if not final:
+            # Skip if a previous background sync is still in progress
+            if self._sync_thread is not None and self._sync_thread.is_alive():
+                log.debug('NAS sync already in progress; skipping this interval')
+                return
+
+        destinations = [self.data_directory]
+        nas = (self.nas_directory or '').strip()
+        if nas:
+            destinations.append(nas)
+
+        def _do_sync():
+            for dest_dir in destinations:
+                try:
+                    os.makedirs(dest_dir, exist_ok=True)
+                except Exception as exc:
+                    log.warning(f'Cannot create sync destination {dest_dir!r}: {exc}')
+                    continue
+                for ctrl_id, local_path in list(self._local_csv_paths.items()):
+                    if not os.path.exists(local_path):
+                        continue
+                    # Flush before copying (handle may already be closed on final sync)
+                    handle = self._csv_handles.get(ctrl_id)
+                    if handle is not None:
+                        try:
+                            handle['file'].flush()
+                        except Exception:
+                            pass
+                    dest_path = os.path.join(dest_dir, os.path.basename(local_path))
+                    try:
+                        shutil.copy2(local_path, dest_path)
+                        log.debug(f'Synced {ctrl_id} → {dest_path}')
+                    except Exception as exc:
+                        log.warning(f'Sync failed ({ctrl_id} → {dest_dir!r}): {exc}')
+            self._last_nas_sync = time.monotonic()
+            log.info(f'NAS sync complete (destinations: {destinations})')
+
+        if final:
+            _do_sync()
+        else:
+            self._sync_thread = threading.Thread(
+                target=_do_sync, name='gss-nas-sync', daemon=True
+            )
+            self._sync_thread.start()

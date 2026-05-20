@@ -1393,7 +1393,7 @@ def main():
         
         # Set working directory
         print("\n=== Setting Working Directory ===")
-        scope.set_working_directory('C:\\Users\\Administrator\\Desktop\\GUI_test\\')
+        scope.set_working_directory('C:\\Users\\Public\\Documents\\Infiniium\\')
 
         # Configure external probes
         scope.configure_external_probe(2, gain=0.04913, units='AMPere', offset=0.0)

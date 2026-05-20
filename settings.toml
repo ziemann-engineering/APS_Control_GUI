@@ -6,10 +6,10 @@ geometry = "AdnQywADAAAAAAAAAAAAHQAADv8AAAgzAAAHKAAAArQAAAtWAAAH1AAAAAACAAAADwAA
 state = "AAAA/wAAAAD9AAAAAQAAAAAAAAGeAAAIF/wCAAAAAfsAAAAgAEkAbgBwAHUAdABfAFAAYQByAGEAbQBlAHQAZQByAHMBAAAAAAAACBcAAAUhAP///wAADV0AAAgXAAAABAAAAAQAAAAIAAAACPwAAAAA"
 
 [directories]
-Random_Number_Test = "e:\\Projekte\\Ziemann Engineering\\Projekte\\rSCT\\Python Software\\data\\Random"
+Random_Number_Test = "./data/Random"
 High_Power_Pulse_Test = "./data"
-Double_Pulse_Test = "e:\\Projekte\\Ziemann Engineering\\Projekte\\HPPT2\\Python Software\\data\\DPT"
-Gate_Switching_Stress = "E:\\Projekte\\Ziemann Engineering\\Projekte\\HPPT2\\Python Software\\data\\GSS"
+Double_Pulse_Test = "./data/DPT"
+Gate_Switching_Stress = "./data/GSS"
 
 [docks]
 Random_Number_Test = "json:{\"main\": [\"vertical\", [[\"dock\", \"Dock 1\", {}], [\"dock\", \"Dock 2\", {}]], {\"sizes\": [163, 163]}], \"float\": []}"

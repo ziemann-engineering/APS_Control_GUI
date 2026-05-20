@@ -124,7 +124,7 @@ class ConnectionTestThread(QThread):
                 port = self.connection_params.get(key)
                 break
         if not port:
-            port = 'COM3'
+            port = 'COM3' if os.name == 'nt' else '/dev/ttyACM0'
         log.info(f"Testing APS controller connection on port: {port}")
 
         # Optionally enable AUX PSU CH1 before testing

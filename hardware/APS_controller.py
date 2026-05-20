@@ -31,6 +31,8 @@ Usage:
 """
 
 import serial
+import datetime
+import os
 import time
 import re
 import threading
@@ -38,8 +40,52 @@ from typing import Optional, Union
 from dataclasses import dataclass
 from enum import Enum
 
-compatible_build_date = (2025, 10, 1)  # enter compatible version's build: Year, Month, Day
-compatible_board_type = "APS Control Board 1.3" # enter compatible board type string
+compatible_build_date = (2025, 10, 1)  # (year, month, day) — minimum acceptable firmware build
+compatible_board_type = "APS Control Board 1.3"  # device name field in *IDN? response
+
+# Directory containing firmware .bin files.
+# Resolved relative to this file's location (hardware/ -> Python Software/ -> firmware/).
+FIRMWARE_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'firmware'
+)
+
+_DATE_RE = re.compile(
+    rb'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)'
+    rb'[ \t]+\d{1,2}[ \t]+\d{4}'
+)
+
+
+def _parse_aps_idn(response: str) -> Optional[dict]:
+    """Parse the *IDN? response from the APS controller.
+
+    Expected format::
+
+        APS,APS Control Board 1.3,<SN_hex>,<build date>
+
+    Returns a dict with keys ``manufacturer``, ``device``, ``serial``,
+    ``fw_date_str``, ``fw_date`` (datetime.date or None),
+    or ``None`` if parsing fails.
+    """
+    for line in response.splitlines():
+        line = line.strip().rstrip('>')
+        if ',' in line:
+            fields = [f.strip() for f in line.split(',')]
+            if len(fields) >= 4:
+                manufacturer, device, serial, fw_date_str = (
+                    fields[0], fields[1], fields[2], ','.join(fields[3:]))
+                fw_date = None
+                date_str = ' '.join(fw_date_str.split())
+                for fmt in ('%b %d %Y', '%B %d %Y', '%Y-%m-%d',
+                            '%d-%m-%Y', '%m/%d/%Y'):
+                    try:
+                        fw_date = datetime.datetime.strptime(date_str, fmt).date()
+                        break
+                    except ValueError:
+                        continue
+                return {'manufacturer': manufacturer, 'device': device,
+                        'serial': serial, 'fw_date_str': fw_date_str,
+                        'fw_date': fw_date}
+    return None
 
 
 class TestType(Enum):
@@ -411,7 +457,104 @@ class APSController:
             Response string from controller, or None if error
         """
         return self._send_command("start")
-    
+
+    def get_idn(self) -> Optional[dict]:
+        """Send *IDN? and return a parsed dict or None.
+
+        Returns keys: ``manufacturer``, ``device``, ``serial``,
+        ``fw_date_str``, ``fw_date`` (datetime.date or None).
+        """
+        response = self._send_command('*IDN?')
+        if response is None:
+            return None
+        return _parse_aps_idn(response)
+
+    @staticmethod
+    def probe_port(port: str, baudrate: int = 38400, timeout: float = 0.5) -> Optional[dict]:
+        """Non-destructive probe of *port* to identify an APS control board.
+
+        Opens the port, sends ``*IDN?\\r\\n``, and parses the response.
+        The port is always closed afterwards regardless of result.
+
+        Returns a dict with keys ``device_type`` ('aps'), ``port``, ``serial``,
+        ``version``, ``label``; or *None* if no APS board answered.
+        """
+        try:
+            with serial.Serial(port, baudrate, timeout=timeout) as ser:
+                ser.reset_input_buffer()
+                ser.write(b'*IDN?\r\n')
+                time.sleep(0.3)
+                data = ser.read(512).decode('ascii', errors='ignore')
+            idn = _parse_aps_idn(data)
+            if idn is None or 'APS Control Board' not in idn.get('device', ''):
+                return None
+            sn = idn.get('serial', '')
+            ver = idn.get('fw_date_str', '')
+            return {'device_type': 'aps', 'port': port, 'serial': sn,
+                    'version': ver, 'build_date': idn.get('fw_date'),
+                    'label': f"APS  SN:{sn}  {ver}  ({port})"}
+        except Exception:
+            return None
+
+    @staticmethod
+    def find_firmware_update(current_build_date: 'datetime.date | str | None',
+                             firmware_dir: str = FIRMWARE_DIR) -> Optional[str]:
+        """Search *firmware_dir* for an APS firmware ``.bin`` newer than *current_build_date*.
+
+        The build date is read directly from each ``.bin`` by locating the
+        ``__DATE__`` ASCII string that GCC embeds when it is referenced in source
+        (e.g. in the ``*IDN?`` response).  No special filename convention required.
+
+        Parameters
+        ----------
+        current_build_date:
+            Build date of the running firmware from ``*IDN?``.  Accepts a
+            :class:`datetime.date`, an ISO-format string, or ``None`` (treat any
+            file with a parseable date as a candidate).
+        """
+        if not os.path.isdir(firmware_dir):
+            return None
+        if isinstance(current_build_date, str):
+            # Parse ISO date string
+            for fmt in ('%Y-%m-%d', '%b %d %Y', '%B %d %Y'):
+                try:
+                    current_build_date = datetime.datetime.strptime(
+                        ' '.join(current_build_date.split()), fmt).date()
+                    break
+                except ValueError:
+                    pass
+            else:
+                current_build_date = None
+
+        best_path: Optional[str] = None
+        best_date: Optional[datetime.date] = current_build_date
+        for fname in os.listdir(firmware_dir):
+            if not fname.lower().endswith('.bin'):
+                continue
+            fpath = os.path.join(firmware_dir, fname)
+            try:
+                with open(fpath, 'rb') as f:
+                    data = f.read()
+                m = _DATE_RE.search(data)
+                if not m:
+                    continue
+                date_str = ' '.join(m.group(0).decode('ascii', errors='ignore').split())
+                fdate = None
+                for fmt in ('%b %d %Y', '%B %d %Y'):
+                    try:
+                        fdate = datetime.datetime.strptime(date_str, fmt).date()
+                        break
+                    except ValueError:
+                        pass
+                if fdate is None:
+                    continue
+                if best_date is None or fdate > best_date:
+                    best_date = fdate
+                    best_path = fpath
+            except OSError:
+                continue
+        return best_path
+
     def info(self, print_response: bool = True, timeout: Optional[float] = None) -> Optional[dict]:
         """
         Get system information from the APS controller.
@@ -494,40 +637,43 @@ class APSController:
     
     def _validate_board_info(self) -> bool:
         """
-        Validate that the connected board is the correct type and firmware version.
-        
+        Validate that the connected board is the correct type and firmware version
+        using the *IDN? response.
+
         Returns:
             True if board validation passes, False otherwise
         """
         try:
-            # Get system info without printing
-            info_data = self.info(print_response=False)
-            if not info_data:
-                print("Failed to get system information for validation")
+            response = self._send_command('*IDN?')
+            if not response:
+                print("Board validation failed: no response to *IDN?")
                 return False
-            
-            # Check board type
-            board_name = info_data.get('board') or info_data.get('Board', '')
-            
-            if board_name != compatible_board_type:
+
+            idn = _parse_aps_idn(response)
+            if idn is None:
+                print(f"Board validation failed: could not parse *IDN? response: {response!r}")
+                return False
+
+            if idn['device'] != compatible_board_type:
                 print("Board validation failed:")
                 print(f"  Expected: {compatible_board_type}")
-                print(f"  Found: {board_name}")
+                print(f"  Found: {idn['device']}")
                 return False
-            
-            # Check build time (must be after September 2025)
-            build_time_str = info_data.get('build_time') or info_data.get('Build time', '')
-            if not build_time_str:
-                print("Build time not found in system information")
-                return False
-            
-            if not self._validate_build_time(build_time_str):
-                return False
-            
-            print(f"Board validation passed: {board_name}")
-            print(f"Build time: {build_time_str}")
+
+            fw_date = idn.get('fw_date')
+            if fw_date is None:
+                print("Warning: could not parse firmware build date from *IDN? response")
+            else:
+                min_date = datetime.date(*compatible_build_date)
+                if fw_date < min_date:
+                    print("Firmware build date validation failed:")
+                    print(f"  Build date: {fw_date}")
+                    print(f"  Required: on or after {min_date.strftime('%d %B %Y')}")
+                    return False
+
+            print(f"Board validation passed: {idn['device']}  SN:{idn['serial']}  Built:{idn['fw_date_str']}")
             return True
-            
+
         except Exception as e:
             print(f"Board validation error: {e}")
             return False

@@ -1,7 +1,7 @@
 # ZE APS Measurement GUI — User Manual
 
 **Version:** Compatible with APS Control Board 1.3 (firmware build ≥ 2025-10-01)  
-**Platform:** Windows (primary), Linux (experimental)  
+**Platform:** Windows, Linux  
 **Python:** 3.8.9 or later
 
 ---
@@ -154,6 +154,19 @@ pip install -r requirements_3.8.9_pinned.txt
 | `pyqtgraph` | Real-time data plotting |
 | `toml` | Settings file handling |
 
+### 4.4 External Tools
+
+**`dfu-util`** — required for GSS controller firmware updates (flashing `.bin` over USB DFU).
+It is an OS-level tool, not a Python package, and must be available on `PATH`.
+
+- **Windows:** download from https://dfu-util.sourceforge.net/ and add the folder to `PATH`, or install via [Chocolatey](https://chocolatey.org/): `choco install dfu-util`
+- **Linux (Debian/Ubuntu):** `sudo apt install dfu-util`
+- **Linux (Fedora):** `sudo dnf install dfu-util`
+
+To verify: `dfu-util --version`
+
+> **Note:** `dfu-util` is only needed if you use the *Flash GSS Firmware* feature in the startup dialog. The rest of the GUI works without it.
+
 ### 4.4 Launch the Application
 
 ```bash
@@ -206,7 +219,7 @@ For the Gate Switching Stress procedure, the startup dialog scans all serial por
 
 ### 6.4 Launch Button
 
-Clicking **Launch** passes the selected procedure and all connection parameters to the main window and closes the dialog. The main window then opens, connects to the instruments, and is ready to start measurements.
+Clicking **Launch** passes the selected procedure and all connection parameters to the main window and closes the dialog. It also automatically runs a  connection test for all devices. The main window then opens, connects to the instruments, and is ready to start measurements.
 
 ---
 
@@ -492,7 +505,8 @@ Below the file field, a directory chooser sets the folder for output files. The 
 | Temperature | °C | −40 – 250 | 25.0 | Target DUT temperature |
 | Log Interval | s | 10 – 3600 | 60 | Period between telemetry log entries |
 | Vth Measurement Interval | min | 5 – 1440 | 60 | Period between Vth measurements |
-| Data Directory | — | — | `data/GSS` | Directory for per-controller CSV files |
+| Data Directory | — | — | `data/GSS` | Destination directory for per-controller CSV files (local or NAS) |
+| NAS Directory | — | — | *(empty)* | Optional second destination, typically a NAS mount point — see [Data Storage](#gss-data-storage) |
 
 #### Data Output (per log entry, per DUT)
 
@@ -510,7 +524,19 @@ Below the file field, a directory chooser sets the folder for output files. The 
 
 **Plot:** Timestamp vs. Vth (V).
 
-In addition to the pymeasure results table, each controller also writes its own CSV file directly to the **Data Directory** with the naming pattern `GSS_<id>_<YYYY-MM-DD_HH-MM-SS>.csv`.
+In addition to the pymeasure results table, each controller also writes its own CSV file with the naming pattern `GSS_<id>_<YYYY-MM-DD_HH-MM-SS>.csv`.
+
+#### Data Storage {#gss-data-storage}
+
+Because a GSS run can last days or weeks, and CSV rows are flushed after every log entry, the storage path matters:
+
+- **Local cache** — all CSV files are always written first to a temporary directory on the local machine (`/tmp/gss_cache_<random>/` on Linux, `%TEMP%\gss_cache_<random>\` on Windows).  Writes to the local filesystem are fast and never block the stress test, even if the network is unavailable.
+- **Data Directory** — at the end of the run (and every hour during the run) the local cache files are copied to **Data Directory**.  This is the primary output and can be a local path or an already-mounted NAS share.
+- **NAS Directory** — if set, the same files are also copied to this second location every hour and on run completion.  Leave empty if no separate NAS backup is needed.
+
+The hourly sync runs in a background thread.  If the NAS is unreachable the warning is logged and the test continues unaffected — the next sync attempt occurs one hour later.  No data is lost as long as the local machine stays up.
+
+> **NAS mount note:** the software does not mount the share itself; it expects the path to already be accessible (e.g. via `/etc/fstab` or `systemd.mount` on Linux).  A write failure to the NAS is logged as a warning and never aborts the test.
 
 #### GSS Procedure — Step by Step
 
@@ -537,7 +563,8 @@ In addition to the pymeasure results table, each controller also writes its own 
    - If using temperature control, set **Temperature** and the correct **TCU Channel**.
    - Choose the **Vth Method**: `force_current` forces a constant current and measures gate voltage (standard); `ramp_voltage` sweeps gate voltage and detects the current threshold.
    - Adjust **Log Interval** and **Vth Measurement Interval** as needed.
-   - Set the **Data Directory**.
+   - Set the **Data Directory** (local path or mounted share path).
+   - Optionally set **NAS Directory** to a second destination (e.g. `/mnt/nas/GSS`) for an additional hourly backup copy.
 
 4. **Multi-controller advanced mode (optional):**
    - To run several GSS controllers simultaneously with individual configurations, populate the **Controller Configuration (JSON)** field with a JSON array (see below).
@@ -576,7 +603,8 @@ In addition to the pymeasure results table, each controller also writes its own 
 6. **Monitoring a long-duration test:**
    - The live plot shows Vth vs. time for all DUTs.
    - The results table shows one row per log entry per DUT.
-   - Per-controller CSV files accumulate in the **Data Directory**.
+   - Per-controller CSV files accumulate in the **Data Directory** (and **NAS Directory** if configured), synced every hour.
+   - The local cache location is logged at startup (search the log for `GSS local cache:`).
    - The Status column in the table shows the worker state (`running`, `stopped`, `startup error`, etc.).
 
 7. **Stop / Abort:**
@@ -776,7 +804,7 @@ The driver supports:
 
 **File:** `hardware/tcu_driver.py`
 
-The `TCUDriver` class wraps the ZE TCU library, which must be installed separately in a known location relative to the workspace.
+The `TCUDriver` class wraps the ZE TCU library (`hardware/TCU.py`), which is bundled directly in the `hardware/` directory.
 
 #### Connection
 
@@ -785,15 +813,6 @@ Serial port: e.g., `COM7` or `/dev/ttyUSB1`.
 #### Usage (GSS)
 
 During a GSS stress test, the TCU maintains the DUT at the target temperature. Each GSS worker applies the configured temperature to its assigned TCU channel at startup. The actual temperature is read back and logged every **Log Interval** seconds.
-
-#### TCU Library Location
-
-The driver searches for `TCU.py` in:
-
-1. `../../../../GSS/Python software/TCU lib/` relative to the hardware folder.
-2. `e:\Projekte\Ziemann Engineering\Projekte\GSS\Python software\TCU lib`.
-
-If `TCU.py` is not found, the driver logs a warning. `TCUDriver.connect()` will raise `ImportError` at runtime if the TCU is enabled.
 
 ---
 

@@ -6,6 +6,6 @@ logs/*
 data/*
 drivers/*
 wheels/*
-
+firmware/*
 *code-workspace
 .vscode/settings.json

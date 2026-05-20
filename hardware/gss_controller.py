@@ -28,25 +28,76 @@ from dataclasses import dataclass, field
 from typing import Optional, Tuple
 
 
-# Update these when the firmware version that the software is compatible with
-# is known.
-compatible_build_date = (2026, 1, 1)
-compatible_board_type = "GSS Control Board"
+import datetime
 
-# Directory containing GSS_CONTROL_v{major}.{minor}.bin firmware files.
+# Update compatible_build_date when a new firmware release is required.
+# The software will warn if the connected board's firmware is older than this date.
+compatible_build_date = (2026, 1, 1)  # (year, month, day)
+compatible_board_type = "GSS Control Board"
+compatible_manufacturer = "Ziemann Engineering"
+
+# Directory containing firmware .bin files.
 # Resolved relative to this file's location (hardware/ -> Python Software/ -> firmware/).
 FIRMWARE_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'firmware'
 )
 
 
-def _parse_version(version_str: str) -> Tuple[int, int]:
-    """Parse 'major.minor' string into an (int, int) tuple for comparison."""
-    try:
-        parts = version_str.strip().split('.')
-        return (int(parts[0]), int(parts[1]) if len(parts) > 1 else 0)
-    except (ValueError, IndexError):
-        return (0, 0)
+def _parse_build_date(date_str: str) -> Optional[datetime.date]:
+    """Parse a build date string as returned by the firmware (*IDN? response).
+
+    Handles formats produced by the C ``__DATE__`` macro, e.g. ``"May 17 2026"``
+    or ``"May  7 2026"`` (single-digit day padded with a space), as well as
+    ``YYYY-MM-DD`` for manually formatted dates.
+    Returns a :class:`datetime.date` or ``None`` on failure.
+    """
+    # Strip extra whitespace (single-digit days get double-spaced by __DATE__)
+    date_str = ' '.join(date_str.split())
+    for fmt in ('%b %d %Y', '%B %d %Y', '%Y-%m-%d', '%d-%m-%Y', '%m/%d/%Y'):
+        try:
+            return datetime.datetime.strptime(date_str, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _parse_idn_response(response: str) -> Optional[dict]:
+    """Parse a standard *IDN? response string.
+
+    Expected format (firmware):
+        ``Ziemann Engineering,GSS Control Board,<SN_hex>,<ver> / <build date>``
+
+    Returns a dict with keys ``manufacturer``, ``device``, ``serial``,
+    ``version``, ``build_date`` (a :class:`datetime.date` or ``None``),
+    or ``None`` if parsing fails.
+    """
+    # Strip shell prompt artifacts ('>', newlines)
+    line = response.strip().lstrip('>')
+    for part in response.splitlines():
+        part = part.strip().rstrip('>')
+        if ',' in part:
+            line = part
+            break
+    fields = [f.strip() for f in line.split(',')]
+    if len(fields) < 4:
+        return None
+    manufacturer, device, serial, fw_field = fields[0], fields[1], fields[2], ','.join(fields[3:])
+    # Firmware version field: "0.1 / May 17 2026" — split on '/'
+    version = fw_field.strip()
+    build_date = None
+    if '/' in fw_field:
+        ver_part, date_part = fw_field.split('/', 1)
+        version = ver_part.strip()
+        build_date = _parse_build_date(date_part.strip())
+    else:
+        build_date = _parse_build_date(fw_field.strip())
+    return {
+        'manufacturer': manufacturer,
+        'device': device,
+        'serial': serial,
+        'version': version,
+        'build_date': build_date,
+    }
 
 
 class GSSControllerError(Exception):
@@ -141,14 +192,31 @@ class GSSController:
             )
             time.sleep(0.1)
 
-            # A "status" command is expected on the GSS board as well.
-            # TODO: update handshake logic when firmware is finalised.
-            response = self._send_command('status')
+            # Identify the board with *IDN? and validate manufacturer / device type.
+            response = self._send_command('*IDN?')
             if response is None:
                 self.disconnect()
                 return False
+            idn = _parse_idn_response(response)
+            if idn is None or idn.get('device') != compatible_board_type:
+                found = idn.get('device') if idn else response.strip()
+                print(f'GSS board validation failed: expected "{compatible_board_type}", got "{found}"')
+                self.disconnect()
+                return False
 
-            print(f'Connected to GSS controller on {self.port}')
+            # Warn (but do not block) if firmware is older than the compatible date.
+            bd = idn.get('build_date')
+            min_date = datetime.date(*compatible_build_date)
+            if bd is not None and bd < min_date:
+                print(f'Warning: GSS firmware build date {bd} is older than required {min_date}')
+            elif bd is None:
+                print('Warning: could not parse firmware build date from *IDN? response')
+
+            self.serial_number = idn.get('serial', '')
+            self.fw_version = idn.get('version', '')
+            self.fw_build_date = bd
+            print(f'Connected to GSS controller on {self.port}  '
+                  f'SN:{self.serial_number}  FW:{idn.get("version","")} / {bd}')
             return True
 
         except Exception as exc:
@@ -227,63 +295,54 @@ class GSSController:
     # -----------------------------------------------------------------------
 
     def get_id(self) -> Optional[dict]:
-        """Send ID command and return {'type': 'GSS', 'serial': '<sn>', 'version': '<ver>'} or None.
+        """Send *IDN? and return parsed result dict, or None on failure.
 
-        Firmware responds with 'GSS,SN:<sn>,VER:<ver>' followed by the shell prompt.
+        Returns keys: ``manufacturer``, ``device``, ``serial``, ``version``,
+        ``build_date`` (datetime.date or None).
         """
-        response = self._send_command('ID')
-        if response and 'GSS,SN:' in response:
-            sn_part = response.split('GSS,SN:')[1]
-            sn = sn_part.split(',')[0].split()[0].rstrip('>')
-            ver = '0.0'
-            if 'VER:' in response:
-                ver = response.split('VER:')[1].split()[0].strip().rstrip('>')
-            return {'type': 'GSS', 'serial': sn, 'version': ver}
-        return None
+        response = self._send_command('*IDN?')
+        if response is None:
+            return None
+        return _parse_idn_response(response)
 
     @staticmethod
     def probe_port(port: str, baudrate: int = 38400, timeout: float = 0.5) -> Optional[dict]:
         """Non-destructive probe of *port* to identify a GSS or TCU device.
 
-        Opens the port, sends 'ID\\r\\n', and parses the response.  The port
-        is always closed afterwards, regardless of result.
+        Opens the port, sends ``*IDN?\\r\\n``, and parses the standard IDN
+        response.  The port is always closed afterwards, regardless of result.
 
         Returns
         -------
         dict with keys ``device_type`` ('gss' or 'tcu'), ``port``, ``serial``,
-        ``label``; or *None* if no recognised device answered.
+        ``version``, ``build_date``, ``label``; or *None* if no recognised
+        device answered.
         """
         try:
             import serial as _serial
             with _serial.Serial(port, baudrate, timeout=timeout) as ser:
                 ser.reset_input_buffer()
-                ser.write(b'ID\r\n')
+                ser.write(b'*IDN?\r\n')
                 time.sleep(0.3)
-                data = ser.read(256).decode('ascii', errors='ignore')
-            if 'GSS,SN:' in data:
-                sn_part = data.split('GSS,SN:')[1].split('\n')[0].strip()
-                sn = sn_part.split(',')[0].rstrip('>')
-                ver = '0.0'
-                if 'VER:' in data:
-                    ver = data.split('VER:')[1].split()[0].strip().rstrip('>')
+                data = ser.read(512).decode('ascii', errors='ignore')
+            idn = _parse_idn_response(data)
+            if idn is None:
+                return None
+            device = idn.get('device', '')
+            sn = idn.get('serial', '')
+            ver = idn.get('version', '')
+            bd = idn.get('build_date')
+            if 'GSS' in device:
                 return {'device_type': 'gss', 'port': port, 'serial': sn,
-                        'version': ver,
-                        'label': f'GSS  SN:{sn}  v{ver}  ({port})'}
-            if 'TCU,SN:' in data:
-                sn = data.split('TCU,SN:')[1].split('\n')[0].strip().rstrip('>')
+                        'version': ver, 'build_date': bd,
+                        'label': f'GSS  SN:{sn}  {ver}  ({port})'}
+            if 'TCU' in device:
                 return {'device_type': 'tcu', 'port': port, 'serial': sn,
-                        'label': f'TCU  SN:{sn}  ({port})'}
+                        'version': ver, 'build_date': bd,
+                        'label': f'TCU  SN:{sn}  {ver}  ({port})'}
         except Exception:
             pass
         return None
-
-    def info(self) -> Optional[str]:
-        """Return raw firmware / board info string.
-
-        TODO: confirm command name ('info'?) with firmware.
-        """
-        # TODO: update command string when firmware protocol is finalised
-        return self._send_command('info')
 
     def get_status(self) -> Optional[str]:
         """Return raw status string from controller."""
@@ -349,29 +408,69 @@ class GSSController:
             pass
 
     @staticmethod
-    def find_firmware_update(current_version: str,
-                             firmware_dir: str = FIRMWARE_DIR) -> Optional[str]:
-        """Search *firmware_dir* for a GSS firmware file newer than *current_version*.
+    def _read_build_date_from_bin(path: str) -> Optional[datetime.date]:
+        """Extract the build date embedded in a firmware ``.bin`` file.
 
-        Files must match the pattern ``GSS_CONTROL_v{major}.{minor}.bin``.
+        The GCC compiler embeds ``__DATE__`` as a plain ASCII string whenever
+        it is referenced in the source (e.g. in the ``*IDN?`` response).
+        The string format is ``"Mmm  d yyyy"`` or ``"Mmm dd yyyy"`` (11 chars).
+
+        Scans the binary for the first occurrence of that pattern and returns
+        the parsed date, or ``None`` if not found.
+        """
+        _DATE_RE = re.compile(
+            rb'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)'
+            rb'[ \t]+\d{1,2}[ \t]+\d{4}'
+        )
+        try:
+            with open(path, 'rb') as f:
+                data = f.read()
+            m = _DATE_RE.search(data)
+            if m:
+                return _parse_build_date(m.group(0).decode('ascii', errors='ignore'))
+        except OSError:
+            pass
+        return None
+
+    @staticmethod
+    def find_firmware_update(current_build_date: 'datetime.date | str | None',
+                             firmware_dir: str = FIRMWARE_DIR) -> Optional[str]:
+        """Search *firmware_dir* for a GSS firmware ``.bin`` newer than *current_build_date*.
+
+        The build date is read directly from each ``.bin`` file by locating the
+        ``__DATE__`` string that the compiler embeds when it is referenced in
+        source (e.g. in the ``*IDN?`` response).  No special filename convention
+        is required — any ``.bin`` file in the directory is inspected.
+
+        Parameters
+        ----------
+        current_build_date:
+            Build date of the currently running firmware, as reported by
+            ``*IDN?``.  Accepts a :class:`datetime.date`, an ISO-format string
+            ``'YYYY-MM-DD'``, or ``None`` (any file with a parseable date is
+            returned as an update candidate).
 
         Returns the path of the newest qualifying file, or *None* if no update
         is available or the directory does not exist.
         """
         if not os.path.isdir(firmware_dir):
             return None
-        cur = _parse_version(current_version)
+
+        if isinstance(current_build_date, str):
+            current_build_date = _parse_build_date(current_build_date)
+
         best_path: Optional[str] = None
-        best_ver: Tuple[int, int] = cur
-        pattern = re.compile(r'GSS_CONTROL_v(\d+)\.(\d+)\.bin$', re.IGNORECASE)
+        best_date: Optional[datetime.date] = current_build_date
         for fname in os.listdir(firmware_dir):
-            m = pattern.match(fname)
-            if not m:
+            if not fname.lower().endswith('.bin'):
                 continue
-            fver = (int(m.group(1)), int(m.group(2)))
-            if fver > best_ver:
-                best_ver = fver
-                best_path = os.path.join(firmware_dir, fname)
+            fpath = os.path.join(firmware_dir, fname)
+            fdate = GSSController._read_build_date_from_bin(fpath)
+            if fdate is None:
+                continue
+            if best_date is None or fdate > best_date:
+                best_date = fdate
+                best_path = fpath
         return best_path
 
     @staticmethod
