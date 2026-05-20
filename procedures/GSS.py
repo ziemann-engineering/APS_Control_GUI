@@ -668,7 +668,7 @@ class GateStressTest(Procedure):
 
     # How often (seconds) local CSV files are copied to the NAS.
     # Syncs run in a background thread so they never block the stress test.
-    _NAS_SYNC_INTERVAL_S: int = 3600
+    _NAS_SYNC_INTERVAL_S: int = 300
 
     # ---- Advanced: multi-controller JSON (optional) ----------------------
     # Leave empty to use the individual parameters above.
@@ -869,6 +869,17 @@ class GateStressTest(Procedure):
 
         # Build workers
         run_ts = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+        self._run_timestamp: str = run_ts
+        self._run_started_at: str = datetime.now().isoformat(timespec='seconds')
+
+        # Write session sentinel so a crash-recovery dialog can find this session
+        # on next startup.  The sentinel lives in the stable data_directory (not
+        # in the OS temp dir) so it survives reboots.
+        self._sentinel_path: str = os.path.join(
+            self.data_directory, f'gss_session_{run_ts}.json'
+        )
+        self._write_sentinel()
+
         for cfg in self._configs:
             psu = self._psu_pool.get(cfg.psu_resource)
             psu_lock = self._psu_locks.get(cfg.psu_resource, threading.Lock())
@@ -994,6 +1005,15 @@ class GateStressTest(Procedure):
 
         # Final sync: copy closed CSVs to data_directory and NAS
         self._sync_to_nas(final=True)
+
+        # Remove the session sentinel — clean shutdown means no recovery needed
+        sentinel = getattr(self, '_sentinel_path', None)
+        if sentinel and os.path.exists(sentinel):
+            try:
+                os.remove(sentinel)
+                log.debug(f'Removed GSS session sentinel: {sentinel}')
+            except Exception as exc:
+                log.warning(f'Failed to remove GSS session sentinel: {exc}')
 
         log.info('GSS shutdown complete')
 
@@ -1360,6 +1380,8 @@ class GateStressTest(Procedure):
                         log.warning(f'Sync failed ({ctrl_id} → {dest_dir!r}): {exc}')
             self._last_nas_sync = time.monotonic()
             log.info(f'NAS sync complete (destinations: {destinations})')
+            # Update the sentinel so recovery logic knows when data was last safe
+            self._write_sentinel(last_synced_at=datetime.now().isoformat(timespec='seconds'))
 
         if final:
             _do_sync()
@@ -1368,3 +1390,45 @@ class GateStressTest(Procedure):
                 target=_do_sync, name='gss-nas-sync', daemon=True
             )
             self._sync_thread.start()
+
+    # -----------------------------------------------------------------------
+    # Session sentinel (crash recovery)
+    # -----------------------------------------------------------------------
+
+    def _write_sentinel(
+        self,
+        last_synced_at: Optional[str] = None,
+    ) -> None:
+        """Write or update the session sentinel JSON file.
+
+        The sentinel is stored in *data_directory* (not in the OS temp dir)
+        so it survives OS reboots.  It records the location of the local cache
+        dir and sync state.  The startup recovery dialog reads these files to
+        offer data recovery after a crash.
+
+        On a clean shutdown :meth:`shutdown` removes the sentinel file instead
+        of marking it completed, so only orphaned (crashed) sessions appear.
+        """
+        sentinel_path = getattr(self, '_sentinel_path', None)
+        if not sentinel_path:
+            return
+        data = {
+            'pid': os.getpid(),
+            'started_at': getattr(self, '_run_started_at', ''),
+            'local_cache_dir': getattr(self, '_local_cache_dir', ''),
+            'data_directory': self.data_directory,
+            'nas_directory': (self.nas_directory or '').strip(),
+            'controllers': [cfg.id for cfg in getattr(self, '_configs', [])],
+            'run_timestamp': getattr(self, '_run_timestamp', ''),
+            'last_synced_at': last_synced_at,
+            'completed': False,
+        }
+        try:
+            # Write atomically via a temp file in the same directory to avoid
+            # a partial read by the recovery dialog.
+            tmp_path = sentinel_path + '.tmp'
+            with open(tmp_path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2)
+            os.replace(tmp_path, sentinel_path)
+        except Exception as exc:
+            log.warning(f'Failed to write GSS session sentinel: {exc}')
