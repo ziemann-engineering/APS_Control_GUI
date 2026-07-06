@@ -14,6 +14,7 @@ from pathlib import Path
 
 from pymeasure.display.Qt import QtWidgets, QtCore
 from pymeasure.display.windows.managed_dock_window import ManagedDockWindow
+from pymeasure.experiment import unique_filename
 
 from PyQt5.QtGui import QIcon
 from datetime import datetime
@@ -195,6 +196,22 @@ class MainWindow(ManagedDockWindow):
             y_axis=y_axis
         )
 
+        # Re-layout the parameter inputs so each label sits inline with its
+        # entry field (instead of stacked above it), which is much more
+        # compact for procedures with many parameters.
+        try:
+            self._make_inputs_compact()
+        except Exception:
+            log.debug('Failed to compact input layout', exc_info=True)
+
+        # Clarify which of the several "directory" fields does what, since
+        # the toolbar's Results Directory is otherwise easily confused with
+        # the procedure's own Local Log / NAS Backup directory parameters.
+        try:
+            self._clarify_directory_labels()
+        except Exception:
+            log.debug('Failed to clarify directory labels', exc_info=True)
+
         # Set objectName for all QDockWidgets to avoid saveState warnings
         try:
             from PyQt5.QtWidgets import QDockWidget
@@ -270,12 +287,198 @@ class MainWindow(ManagedDockWindow):
         # Restore saved input parameters after UI is fully ready
         QtCore.QTimer.singleShot(200, self._restore_input_parameters)
 
+    def _make_inputs_compact(self):
+        """Re-layout pymeasure's auto-generated InputsWidget so each label and
+        its entry field sit on the same row ("Label: [field]") instead of the
+        default stacked layout (label above, field below). This roughly
+        halves the vertical space used by the parameter panel, which matters
+        for procedures with many inputs on smaller screens.
+
+        Directory-type parameters (any input whose name contains
+        "directory") are kept in the original stacked (label above, field
+        below) layout -- since paths can be long -- and are grouped together
+        at the bottom of the panel, after all other (compact) inputs.
+
+        If the procedure class defines ``INPUT_SECTIONS`` (a dict mapping an
+        input name to a section title), a small bold headline is inserted
+        above that input's row, e.g. to group inputs under their associated
+        hardware selector.
+        """
+        inputs = getattr(self, 'inputs', None)
+        if inputs is None or getattr(inputs, '_compact_layout_applied', False):
+            return  # nothing to do, or already compacted
+
+        old_layout = inputs.layout()
+        if old_layout is None:
+            return
+
+        names = list(getattr(inputs, '_inputs', self._inputs_list))
+        labels = getattr(inputs, 'labels', {})
+
+        directory_names = [n for n in names if 'directory' in n.lower()]
+        compact_names = [n for n in names if n not in directory_names]
+
+        # Detach every label/field from the old (vertical) layout without
+        # destroying the widgets themselves, then discard the empty layout.
+        for name in names:
+            widget = getattr(inputs, name, None)
+            if widget is not None:
+                old_layout.removeWidget(widget)
+            label = labels.get(name)
+            if label is not None:
+                old_layout.removeWidget(label)
+        QtWidgets.QWidget().setLayout(old_layout)  # orphans + frees the now-empty layout
+
+        form = QtWidgets.QFormLayout()
+        form.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
+        form.setFormAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignTop)
+        form.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        form.setHorizontalSpacing(10)
+        form.setVerticalSpacing(3)
+
+        # Optional per-procedure section headlines: a dict of
+        # {input_name: 'Section Title'} shown above that input's row, e.g.
+        # to group inputs under their associated hardware selector.
+        procedure_class = getattr(inputs, '_procedure_class', None)
+        sections = getattr(procedure_class, 'INPUT_SECTIONS', {}) or {}
+
+        first_row = True
+        for name in compact_names:
+            widget = getattr(inputs, name, None)
+            if widget is None:
+                continue
+            section_title = sections.get(name)
+            if section_title:
+                headline = QtWidgets.QLabel(section_title)
+                headline.setStyleSheet(
+                    'font-weight: bold;' if first_row else 'font-weight: bold; margin-top: 8px;'
+                )
+                form.addRow(headline)
+            label = labels.get(name)
+            if label is not None:
+                form.addRow(label, widget)
+            else:
+                form.addRow(widget)
+            first_row = False
+
+        outer = QtWidgets.QVBoxLayout()
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addLayout(form)
+
+        if directory_names:
+            outer.addSpacing(8)
+            for name in directory_names:
+                widget = getattr(inputs, name, None)
+                if widget is None:
+                    continue
+                label = labels.get(name)
+                if label is not None:
+                    outer.addWidget(label)
+                outer.addWidget(widget)
+
+        inputs.setLayout(outer)
+        inputs._compact_layout_applied = True
+
+    def _clarify_directory_labels(self):
+        """Make it obvious what each of the two "directory" fields does:
+
+        - Local Directory (toolbar, built into pymeasure): where this run's
+          Results file (the CSV backing the browser/plot) is written. This
+          is the single authoritative local copy of the run's data.
+        - NAS Backup Directory (procedure parameter, GSS only): optional
+          network path that this run's Results file (and checkpoint) is
+          mirrored to, for off-machine backup.
+
+        Renames the generic toolbar "Directory" label and adds tooltips to
+        both so their purposes are clear at a glance.
+        """
+        local_tip = (
+            "Directory for this run's Results file (the CSV shown in the "
+            "browser/plot above).\nThis is the single local copy of the run's data."
+        )
+        nas_tip = (
+            "Optional network directory that mirrors the Results file above, "
+            "for off-machine backup.\nLeave empty to disable."
+        )
+
+        file_input = getattr(self, 'file_input', None)
+        if file_input is not None:
+            for label in file_input.findChildren(QtWidgets.QLabel):
+                if label.text().strip() == 'Directory':
+                    label.setText('Local Directory')
+                    label.setToolTip(local_tip)
+            directory_input = getattr(file_input, 'directory_input', None)
+            if directory_input is not None:
+                directory_input.setToolTip(local_tip)
+
+        inputs = getattr(self, 'inputs', None)
+        labels = getattr(inputs, 'labels', {}) if inputs is not None else {}
+        widget = getattr(inputs, 'nas_directory', None) if inputs is not None else None
+        if widget is not None:
+            widget.setToolTip(nas_tip)
+        label = labels.get('nas_directory')
+        if label is not None:
+            label.setToolTip(nas_tip)
+
+        self._add_directory_browse_button(widget)
+
+    def _add_directory_browse_button(self, line_edit):
+        """Add a trailing browse action to a plain QLineEdit, matching the
+        folder-picker button pymeasure's own Local Directory field has.
+        """
+        if line_edit is None:
+            return
+        try:
+            from PyQt5.QtWidgets import QAction
+            browse_action = QAction(line_edit)
+            browse_action.setIcon(line_edit.style().standardIcon(
+                getattr(QtWidgets.QStyle.StandardPixmap, 'SP_DialogOpenButton')))
+            browse_action.setToolTip('Browse…')
+            browse_action.triggered.connect(lambda: self._browse_for_directory(line_edit))
+            line_edit.addAction(browse_action, QtWidgets.QLineEdit.ActionPosition.TrailingPosition)
+        except Exception:
+            log.debug('Failed to add directory browse button', exc_info=True)
+
+    def _browse_for_directory(self, line_edit):
+        current = line_edit.text().strip()
+        start = current if current and os.path.isdir(current) else os.path.dirname(os.path.abspath(__file__))
+        chosen = QtWidgets.QFileDialog.getExistingDirectory(self, 'Directory', start)
+        if chosen:
+            line_edit.setText(chosen)
+
     def _customize_plots(self):
         """Customize plot appearance after widgets are created."""
         try:
             self._enable_all_grids()
         except Exception:
             log.debug('Failed to enable plot grids', exc_info=True)
+        try:
+            self._restrict_plot_axis_choices()
+        except Exception:
+            log.debug('Failed to restrict plot axis choices', exc_info=True)
+
+    def _restrict_plot_axis_choices(self):
+        """Remove string-valued columns (e.g. 'Controller', 'Status') from the
+        plot's X/Y axis dropdowns, since selecting them as an axis errors out
+        -- they can't be plotted as numeric data.
+
+        Only applies if the procedure class defines a ``NON_PLOTTABLE_COLUMNS``
+        list; other procedures are left untouched.
+        """
+        non_plottable = getattr(self.procedure.__class__, 'NON_PLOTTABLE_COLUMNS', None)
+        if not non_plottable:
+            return
+        dock = self._get_current_dock()
+        if dock is None:
+            return
+        for plot_widget in getattr(dock, 'plot_frames', []):
+            for combo in (getattr(plot_widget, 'columns_x', None), getattr(plot_widget, 'columns_y', None)):
+                if combo is None:
+                    continue
+                for name in non_plottable:
+                    idx = combo.findText(name)
+                    if idx >= 0:
+                        combo.removeItem(idx)
 
     def _initialize_aux_psu(self):
         """Initialize AUX PSU Ch1 when main window loads.
@@ -787,6 +990,23 @@ class MainWindow(ManagedDockWindow):
             if device_ids and hasattr(procedure, '_apply_device_ids'):
                 procedure._apply_device_ids(device_ids)
                 log.info(f"Pre-applied device IDs to procedure: {list(device_ids.keys())}")
+            # Let the procedure know exactly where pymeasure will save this run's
+            # Results file, so procedures that mirror it elsewhere (e.g. GSS's
+            # nas_directory) can find it without duplicating file-writing logic.
+            # This must use the exact same arguments as the base class's queue()
+            # so the filename it computes here matches the one pymeasure ends
+            # up using.
+            if self.enable_file_input and self.store_measurement:
+                try:
+                    procedure.results_filepath = unique_filename(
+                        self.directory,
+                        prefix=self.file_input.filename_base,
+                        datetimeformat="",
+                        procedure=procedure,
+                        ext=self.file_input.filename_extension,
+                    )
+                except Exception:
+                    log.debug('Could not pre-compute Results filepath', exc_info=True)
         except Exception:
             log.debug('Failed to pre-apply connection parameters in queue()', exc_info=True)
         super().queue(procedure)

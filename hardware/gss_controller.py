@@ -4,15 +4,14 @@ GSS Controller Interface Library
 Interfaces with the GSS (Gate Switching Stress) control board via serial
 communication.  Uses the same shell-prompt protocol as the APS controller.
 
-Firmware protocol (one command active at a time):
-  GSS_test <cycles> <freq_hz> <duty>  — runs one batch, blocks until done,
-                                        returns "TEST_COMPLETE <total>"
+Firmware protocol:
+    GSS_test <cycles> <freq_hz> <duty>  — starts one batch, returns "OK_STARTED"
   GSS_cycles                          — returns "CYCLES <total>"
   measure_supply                      — returns "POS:+x.xx NEG:y.yy"
   measure_DUT <0-8>                   — returns "OK" (0 = deselect all)
   ID                                  — returns "GSS,SN:XX,VER:0.1"
   status                              — returns running state
-  stop                                — aborts between batches
+    stop                                — aborts a running batch
   dfu                                 — reboot into USB DFU bootloader
   reset                               — MCU software reset
 """
@@ -25,7 +24,7 @@ import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Optional, Tuple
+from typing import Callable, Optional, Tuple
 
 
 import datetime
@@ -348,8 +347,18 @@ class GSSController:
         """Return raw status string from controller."""
         return self._send_command('status')
 
+    def is_running(self) -> bool:
+        """Return True if firmware reports an active GSS batch."""
+        status = self.get_status()
+        if status is None:
+            raise GSSCommunicationError('No response to status command')
+        return 'test running' in status.lower() and 'gss' in status.lower()
+
     def run_batch(self, cycles: int, freq_hz: float, duty_cycle: float,
-                  extra_timeout_s: float = 10.0) -> Optional[int]:
+                  extra_timeout_s: float = 10.0,
+                  poll_interval_s: float = 0.5,
+                  should_stop: Optional[Callable[[], bool]] = None,
+                  on_progress: Optional[Callable[[int], None]] = None) -> Optional[int]:
         """Run one batch of *cycles* switching cycles and block until done.
 
         Parameters
@@ -363,6 +372,19 @@ class GSSController:
         extra_timeout_s:
             Additional seconds added to the expected batch duration as serial
             timeout margin.  Default 10 s.
+        poll_interval_s:
+            Polling interval for non-blocking firmware.
+        should_stop:
+            Optional callback. If it returns True while the batch is running,
+            the driver sends ``stop`` and returns the current cycle count after
+            the controller reports idle.
+        on_progress:
+            Optional callback invoked on every poll iteration while the batch
+            is running, with an *estimated* number of cycles completed so far
+            in this batch. The firmware only updates its cycle counter once,
+            when the whole batch finishes -- it cannot report true progress
+            mid-batch -- so this is calculated locally from elapsed time and
+            *freq_hz*, clamped to *cycles*.
 
         Returns
         -------
@@ -384,17 +406,42 @@ class GSSController:
             raise ValueError('duty_cycle must be in (0, 1)')
 
         batch_duration_s = cycles / freq_hz
-        timeout = batch_duration_s + extra_timeout_s
-
         cmd = f'GSS_test {cycles} {freq_hz:.6g} {duty_cycle:.6g}'
-        response = self._send_command(cmd, timeout=timeout)
+        response = self._send_command(cmd, timeout=max(self.timeout, 2.0))
         if response is None:
             return None
-        # Response contains "TEST_COMPLETE <total>" before the shell prompt
+
+        # Backward-compatible path for older blocking firmware.
         for line in response.splitlines():
             m = re.search(r'TEST_COMPLETE\s+(\d+)', line)
             if m:
                 return int(m.group(1))
+
+        if 'OK_STARTED' not in response:
+            return None
+
+        deadline = time.time() + batch_duration_s + extra_timeout_s
+        batch_start = time.time()
+        poll_interval_s = max(0.1, poll_interval_s)
+        while time.time() < deadline:
+            if should_stop is not None and should_stop():
+                self.stop()
+                stop_deadline = time.time() + max(2.0, extra_timeout_s)
+                while time.time() < stop_deadline:
+                    if not self.is_running():
+                        return self.get_cycle_count()
+                    time.sleep(min(poll_interval_s, 0.5))
+                return self.get_cycle_count()
+
+            if not self.is_running():
+                return self.get_cycle_count()
+
+            if on_progress is not None:
+                elapsed_s = time.time() - batch_start
+                estimated = min(cycles, int(freq_hz * max(0.0, elapsed_s)))
+                on_progress(estimated)
+
+            time.sleep(poll_interval_s)
         return None
 
     def enter_dfu(self) -> None:
@@ -434,7 +481,7 @@ class GSSController:
 
     @staticmethod
     def find_firmware_update(current_build_date: 'datetime.date | str | None',
-                             firmware_dir: str = FIRMWARE_DIR) -> Optional[str]:
+                             firmware_dir: str = FIRMWARE_DIR) -> Optional[Tuple[str, datetime.date]]:
         """Search *firmware_dir* for a GSS firmware ``.bin`` newer than *current_build_date*.
 
         The build date is read directly from each ``.bin`` file by locating the
@@ -450,8 +497,11 @@ class GSSController:
             ``'YYYY-MM-DD'``, or ``None`` (any file with a parseable date is
             returned as an update candidate).
 
-        Returns the path of the newest qualifying file, or *None* if no update
-        is available or the directory does not exist.
+        Returns
+        -------
+        Tuple[str, datetime.date] | None
+            The path and build date of the newest qualifying file, or *None* if no update
+            is available or the directory does not exist.
         """
         if not os.path.isdir(firmware_dir):
             return None
@@ -471,7 +521,7 @@ class GSSController:
             if best_date is None or fdate > best_date:
                 best_date = fdate
                 best_path = fpath
-        return best_path
+        return best_path, best_date
 
     @staticmethod
     def run_dfu_update(firmware_path: str,
@@ -506,9 +556,7 @@ class GSSController:
             return (False, str(exc))
 
     def stop(self) -> bool:
-        """Send stop command.  Only effective between batches (shell is blocked
-        during a running batch).  Returns True if the controller acknowledged.
-        """
+        """Send stop command. Returns True if the controller acknowledged."""
         response = self._send_command('stop')
         return response is not None and 'OK' in response
 

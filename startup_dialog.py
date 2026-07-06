@@ -701,7 +701,16 @@ class GSSAllDeviceScanThread(QThread):
     finished = pyqtSignal()
 
     _BAUDRATE = 38400
-    _ID_CMD = b'ID\r\n'
+    _ID_CMD = b'*IDN?\r\n'
+
+    # List of known serial-port devices: (identifying substring in the *IDN?
+    # reply, device type key).  The *IDN? response is compared against this
+    # list to identify the device before dispatching to its dedicated
+    # per-device ID parsing function.
+    _KNOWN_SERIAL_DEVICES = (
+        ('GSS Control Board', 'gss'),
+        ('TCU', 'tcu'),
+    )
 
     def run(self):
         # ---- Phase 1: serial ports ----------------------------------------
@@ -710,6 +719,8 @@ class GSSAllDeviceScanThread(QThread):
             ports = sorted(p.device for p in serial.tools.list_ports.comports())
         except ImportError:
             ports = []
+
+        from hardware.gss_controller import _parse_idn_response as _parse_gss_idn
 
         for port in ports:
             self.progress.emit(f'Probing {port}…')
@@ -720,18 +731,40 @@ class GSSAllDeviceScanThread(QThread):
                     ser.write(self._ID_CMD)
                     time.sleep(0.3)
                     data = ser.read(256).decode('ascii', errors='ignore')
-                if 'GSS,SN:' in data:
-                    sn_part = data.split('GSS,SN:')[1].split('\n')[0].strip()
-                    sn = sn_part.split(',')[0].rstrip('>')
-                    ver = '0.0'
-                    if 'VER:' in data:
-                        ver = data.split('VER:')[1].split()[0].strip().rstrip('>')
+                    log.debug(f"Received from {port}: {data.strip()}")
+
+                # Compare the response against the list of known devices.
+                dev_type = next(
+                    (t for sig, t in self._KNOWN_SERIAL_DEVICES if sig in data),
+                    None,
+                )
+                if dev_type == 'gss':
+                    # Use the GSS controller's own *IDN? parser to extract SN,
+                    # firmware version and build date.
+                    idn = _parse_gss_idn(data)
+                    if idn is None:
+                        continue
+                    sn = idn.get('serial', 'N/A')
+                    ver = idn.get('version', 'N/A')
+                    build_date = idn.get('build_date')
                     self.device_found.emit({'type': 'gss', 'serial': sn, 'version': ver,
+                                           'build_date': build_date,
                                            'port': port, 'display': f'{sn}  v{ver}  ({port})'})
-                elif 'TCU,SN:' in data:
-                    sn = data.split('TCU,SN:')[1].split('\n')[0].strip().rstrip('>')
-                    self.device_found.emit({'type': 'tcu', 'serial': sn,
-                                           'port': port, 'display': f'{sn}  ({port})'})
+                elif dev_type == 'tcu':
+                    # manufacturer,device,serial,version[ / build date]
+                    details = data.split(',')
+                    if len(details) > 3:
+                        sn = details[2].strip()
+                        fw_field = details[3].split('\n')[0].strip()
+                        if '/' in fw_field:
+                            ver = fw_field.split('/', 1)[0].strip()
+                        else:
+                            ver = fw_field
+                    else:
+                        sn = 'N/A'
+                        ver = 'N/A'
+                    self.device_found.emit({'type': 'tcu', 'serial': sn, 'version': ver,
+                                           'port': port, 'display': f'{sn}  v{ver}  ({port})'})
             except Exception:
                 pass
 
@@ -819,7 +852,25 @@ class _GSSDeviceTestThread(QThread):
     def _test_serial(self):
         import serial as _serial
         port = self.info.get('port', '')
-        prefix = 'GSS,SN:' if self.dev_type == 'gss' else 'TCU,SN:'
+
+        if self.dev_type == 'gss':
+            # Current firmware identifies itself via *IDN? (not the old
+            # 'ID' / 'GSS,SN:' protocol), same as GSSAllDeviceScanThread and
+            # GSSController.connect().
+            from hardware.gss_controller import _parse_idn_response
+            with _serial.Serial(port, 38400, timeout=1.0) as ser:
+                ser.reset_input_buffer()
+                ser.write(b'*IDN?\r\n')
+                time.sleep(0.3)
+                data = ser.read(256).decode('ascii', errors='ignore')
+            idn = _parse_idn_response(data)
+            if idn and idn.get('device') == 'GSS Control Board':
+                self.result.emit(True, f"OK (SN:{idn.get('serial', '?')})")
+            else:
+                self.result.emit(False, 'No valid response')
+            return
+
+        prefix = 'TCU,SN:'
         with _serial.Serial(port, 38400, timeout=1.0) as ser:
             ser.reset_input_buffer()
             ser.write(b'ID\r\n')
@@ -981,16 +1032,26 @@ class GSSHardwareScanWidget(QGroupBox):
         for dev in self._devices:
             if dev.get('type') != 'gss':
                 continue
-            ver = dev.get('version', '0.0')
-            fw_path = GSSController.find_firmware_update(ver, FIRMWARE_DIR)
+            ver = dev.get('version', '?')
+            current_build_date = dev.get('build_date')
+            # find_firmware_update() only returns a path when a .bin on disk
+            # has a build date strictly newer than current_build_date, so no
+            # further date comparison is needed here.
+            fw_path, fw_date = GSSController.find_firmware_update(current_build_date, FIRMWARE_DIR)
+            log.info(
+                f"GSS SN:{dev.get('serial')} firmware date check — "
+                f"device (from *IDN?): {current_build_date}, "
+                f"newest on disk: {fw_date} ({os.path.basename(fw_path) if fw_path else 'none newer'})"
+            )
             if not fw_path:
-                continue
+                continue  # No update needed
             fw_name = os.path.basename(fw_path)
             answer = QMessageBox.question(
                 self,
                 'Firmware Update Available',
-                f'GSS controller SN:{dev["serial"]} is running firmware v{ver}.\n'
-                f'A newer firmware is available: {fw_name}\n\n'
+                f'GSS controller SN:{dev["serial"]} is running firmware v{ver} '
+                f'({current_build_date or "unknown build date"}).\n'
+                f'A newer firmware is available: {fw_name}, built {fw_date}\n\n'
                 'Update now?  The device will reboot automatically.',
                 QMessageBox.Yes | QMessageBox.No,
                 QMessageBox.Yes,
@@ -1600,6 +1661,14 @@ def show_startup_dialog():
 
 
 if __name__ == "__main__":
+    # No handler is configured for the `log` logger when this module is run
+    # standalone (it normally relies on APS GUI.py's logging.basicConfig()).
+    # Configure console logging here so log.debug/info/... calls are visible.
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format='%(asctime)s - %(levelname)s - %(name)s - %(message)s',
+    )
+
     # Test the startup dialog standalone
     config = show_startup_dialog()
     if config:

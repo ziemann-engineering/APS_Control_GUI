@@ -1,69 +1,20 @@
 """
 Gate Switching Stress (GSS) Procedure
 
-Runs long-duration (weeks) gate switching stress tests on N GSS controllers
-simultaneously.  Each controller is managed by a dedicated background worker
-thread.  All workers share one SMU (protected by a threading.Lock) for
-periodic Vth measurement.
-
-Configuration
--------------
-The number of controllers and their individual settings are encoded as a JSON
-array in the *controller_config_json* parameter.  Each element is a dict with
-the following keys:
-
-    id          str   Human-readable controller identifier (e.g. "Ctrl1")
-    port        str   Serial port or VISA ASRL string (e.g. "COM5")
-    freq_hz     float Switching frequency in Hz (1 000 – 10 000 000)
-    duty_cycle  float Duty cycle (0.0 – 1.0)
-    v_gate_on   float Positive gate voltage in V (0 – +32 V)
-    v_gate_off  float Negative gate voltage in V (0 – −32 V, store as negative float)
-    num_duts    int   Number of DUTs on this controller (1 – 8)
-
-    # Optional – PSU (NGE103B or HMC8043)
-    psu_resource  str  VISA resource string; empty string if no PSU control
-    psu_ch_pos    int  PSU channel for positive gate voltage (default 1)
-    psu_ch_neg    int  PSU channel for negative gate voltage (default 2)
-
-    # Optional – Temperature controller (TCU)
-    tcu_port      str   Serial port; empty string if no TCU
-    tcu_channel   int   TCU channel index (1-based, default 1)
-    temperature_c float Target temperature in °C (default 25.0)
-
-    # Optional – SMU channel for Vth measurement
-    smu_channel   str   SMU channel: 'a' or 'b' (2636B), ignored for 2450
-                        (default 'a')
-
-Example (JSON):
-    [
-      {
-        "id": "Ctrl1", "port": "COM5",
-        "freq_hz": 100000, "duty_cycle": 0.5,
-        "v_gate_on": 15.0, "v_gate_off": -5.0, "num_duts": 4,
-        "psu_resource": "ASRL8::INSTR", "psu_ch_pos": 1, "psu_ch_neg": 2,
-        "tcu_port": "COM7", "tcu_channel": 1, "temperature_c": 150.0,
-        "smu_channel": "a"
-      },
-      {
-        "id": "Ctrl2", "port": "COM6",
-        "freq_hz": 200000, "duty_cycle": 0.4,
-        "v_gate_on": 18.0, "v_gate_off": -3.0, "num_duts": 2,
-        "psu_resource": "ASRL8::INSTR", "psu_ch_pos": 1, "psu_ch_neg": 2,
-        "tcu_port": "COM7", "tcu_channel": 2, "temperature_c": 125.0,
-        "smu_channel": "b"
-      }
-    ]
-
-In the above example both controllers share one PSU and one TCU (different
-channels).  The software opens only one VISA/serial connection per unique
-resource string.
+Runs a long-duration (weeks) gate switching stress test on one GSS
+controller.  To run several controllers at once, queue one GSS experiment
+per controller (each uses its own GUI window / queued run); this procedure
+itself always manages exactly one controller.
 
 Data saved
 ----------
 * One CSV row per DUT per log interval, emitted via pymeasure's results
-  mechanism (visible in the standard results table).
-* One CSV file per controller, written directly to *data_directory*.
-  Named  ``GSS_<id>_<YYYY-MM-DD_HH-MM-SS>.csv``.
+  mechanism. This is the same "Results" CSV file shown in the GUI's
+  browser/plot (saved under the toolbar's Directory field).
+* That single Results file (and its checkpoint, used to resume after a
+  crash/restart) is periodically mirrored to *nas_directory* when
+  configured, so the same data exists in exactly two places: the local
+  Directory and the NAS backup.
 
 Aborting
 --------
@@ -71,17 +22,15 @@ Click "Abort" in the GUI.  All workers stop within *worker_shutdown_timeout_s*
 seconds, all PSU / TCU outputs are disabled, and all connections are closed.
 """
 
-import csv
 import json
 import logging
 import math
 import os
 import queue
 import shutil
-import tempfile
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -119,6 +68,17 @@ def update_device_choices(discovered_devices: list) -> None:
     def _serials(dtype: str):
         return [''] + [d['serial'] for d in discovered_devices if d.get('type') == dtype]
 
+    def _set_choices(param, choices):
+        # ListParameter.choices is a read-only property (no setter) -- the
+        # underlying _choices dict must be updated directly, otherwise the
+        # assignment silently raises AttributeError and the dropdown never
+        # actually changes (this used to be swallowed by a broad except in
+        # APS GUI.py, hiding the failure).
+        keys = [str(c) for c in choices]
+        param._choices = {k: c for k, c in zip(keys, choices)}
+        param.default = choices[1]
+        param.value = choices[1]
+
     gss_sn = _serials('gss')
     tcu_sn = _serials('tcu')
     psu_sn = [''] + [
@@ -128,17 +88,13 @@ def update_device_choices(discovered_devices: list) -> None:
     smu_sn = _serials('keithley')
 
     if gss_sn[1:]:
-        GateStressTest.gss_serial.choices = gss_sn
-        GateStressTest.gss_serial.default = gss_sn[1]
+        _set_choices(GateStressTest.gss_serial, gss_sn)
     if tcu_sn[1:]:
-        GateStressTest.tcu_serial.choices = tcu_sn
-        GateStressTest.tcu_serial.default = tcu_sn[1]
+        _set_choices(GateStressTest.tcu_serial, tcu_sn)
     if psu_sn[1:]:
-        GateStressTest.psu_serial.choices = psu_sn
-        GateStressTest.psu_serial.default = psu_sn[1]
+        _set_choices(GateStressTest.psu_serial, psu_sn)
     if smu_sn[1:]:
-        GateStressTest.smu_serial.choices = smu_sn
-        GateStressTest.smu_serial.default = smu_sn[1]
+        _set_choices(GateStressTest.smu_serial, smu_sn)
 
 
 # ---------------------------------------------------------------------------
@@ -161,10 +117,13 @@ class ControllerConfig:
     duty_cycle: float = 0.5
 
     # Vth measurement settings
-    vth_method: str = 'force_current'   # 'force_current' | 'ramp_voltage'
-    vth_force_current_ua: float = 250.0
-    vth_precond_voltage: float = 0.0
-    vth_threshold_current: float = 1e-6
+    vth_method: str = 'ramp_voltage'   # 'force_current' | 'ramp_voltage'
+    vth_current_ma: float = 1.0
+    vth_precond_voltage: float = 15.0
+    vth_ramp_start_voltage: float = 6.0
+    vth_ramp_stop_voltage: float = 0.0
+    vth_ramp_step_voltage: float = 0.05
+    vth_threshold_current: float = 1e-3
     vth_compliance_voltage: float = 10.0
 
     # Optional PSU
@@ -181,32 +140,6 @@ class ControllerConfig:
     tcu_channel: int = 1
     temperature_c: float = 25.0
 
-    @classmethod
-    def from_dict(cls, d: Dict[str, Any]) -> 'ControllerConfig':
-        return cls(
-            id=str(d.get('id', 'Ctrl?')),
-            port=str(d.get('port', '')),
-            gss_serial=str(d.get('gss_serial', '')),
-            num_duts=int(d.get('num_duts', 1)),
-            freq_hz=float(d.get('freq_hz', 100_000)),
-            duty_cycle=float(d.get('duty_cycle', 0.5)),
-            vth_method=str(d.get('vth_method', 'force_current')),
-            vth_force_current_ua=float(d.get('vth_force_current_ua', 250.0)),
-            vth_precond_voltage=float(d.get('vth_precond_voltage', 0.0)),
-            vth_threshold_current=float(d.get('vth_threshold_current', 1e-6)),
-            vth_compliance_voltage=float(d.get('vth_compliance_voltage', 10.0)),
-            psu_resource=str(d.get('psu_resource', '')),
-            psu_serial=str(d.get('psu_serial', '')),
-            psu_ch_pos=int(d.get('psu_ch_pos', 1)),
-            psu_ch_neg=int(d.get('psu_ch_neg', 2)),
-            v_gate_on=float(d.get('v_gate_on', 15.0)),
-            v_gate_off=float(d.get('v_gate_off', -5.0)),
-            tcu_port=str(d.get('tcu_port', '')),
-            tcu_serial=str(d.get('tcu_serial', '')),
-            tcu_channel=int(d.get('tcu_channel', 1)),
-            temperature_c=float(d.get('temperature_c', 25.0)),
-        )
-
 
 # ---------------------------------------------------------------------------
 # Worker
@@ -219,9 +152,10 @@ class GSSWorker:
     plain dicts matching GateStressTest.DATA_COLUMNS.
     """
 
-    # Seconds between log entries (can be reduced by the procedure's
-    # log_interval_s at construction time, kept here for restart robustness).
+    # Seconds between stop checks outside firmware-side batches.
     _MIN_SLEEP_S = 1.0
+    _MAX_FIRMWARE_BATCH_CYCLES = 4_000_000_000
+    _DUT_RELAY_SETTLE_S = 0.05
 
     def __init__(
         self,
@@ -233,6 +167,7 @@ class GSSWorker:
         psu=None,
         psu_lock: Optional[threading.Lock] = None,
         tcu=None,
+        checkpoint_path: str = '',
     ):
         self.cfg = cfg
         self.procedure = procedure
@@ -242,10 +177,21 @@ class GSSWorker:
         self.psu = psu
         self.psu_lock = psu_lock or threading.Lock()
         self.tcu = tcu
+        self.checkpoint_path = checkpoint_path
 
         self.controller = None
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
+
+        # The firmware's GSS_cycles counter accumulates across ALL batches
+        # since the controller was last powered on/reset -- it never resets
+        # per test. _cycle_baseline is the raw firmware count captured right
+        # after connecting, and _session_start_cycle_count is this run's
+        # logical progress (e.g. resumed from a checkpoint) at that same
+        # moment. Together they let raw firmware counts be converted into
+        # this run's own cycle count via _absolute_cycle_count().
+        self._cycle_baseline: int = 0
+        self._session_start_cycle_count: int = 0
 
         # Live state (updated by the worker, read by _emit_row)
         self.cycle_count: int = 0
@@ -255,6 +201,8 @@ class GSSWorker:
         self.last_v_off: Optional[float] = None
         self.status: str = 'initializing'
         self.last_error: str = ''
+        self.batch_number: int = 0
+        self._allow_post_stop_work = False
 
     # ------------------------------------------------------------------
     # Thread management
@@ -290,62 +238,259 @@ class GSSWorker:
 
         try:
             self._connect_controller()
-            # PSU voltages and TCU temperature are applied and verified by
-            # GateStressTest.startup() before the workers are started.
-            self._configure_switching()
-            self._start_switching()
+            self._capture_cycle_baseline()
         except Exception as exc:
             log.error(f'[{self.cfg.id}] Startup failed: {exc}')
-            self.status = f'startup error'
+            self.status = 'startup error'
             self.last_error = str(exc)
             self._emit_row(dut=0)
             return
 
+        try:
+            self._run_batches()
+        finally:
+            try:
+                self._stop_switching()
+            except Exception as exc:
+                log.warning(f'[{self.cfg.id}] Stop error: {exc}')
+            try:
+                if self.controller is not None:
+                    self.controller.disconnect()
+            except Exception as exc:
+                log.warning(f'[{self.cfg.id}] Disconnect error: {exc}')
+            self.status = 'stopped'
+            self._save_checkpoint()
+            log.info(f'[{self.cfg.id}] Worker stopped')
+
+    def _run_batches(self):
         self.status = 'running'
         log.info(f'[{self.cfg.id}] Stress test running')
 
-        log_interval = self.procedure.log_interval_s
-        vth_interval = self.procedure.vth_interval_min * 60.0
+        target_cycles = int(self.procedure.target_cycles)
+        batch_duration_s = max(1.0, float(self.procedure.batch_duration_min) * 60.0)
+        vth_interval = float(self.procedure.vth_interval_min) * 60.0
+        last_vth_time = time.time()
 
-        last_log_time = 0.0
-        last_vth_time = 0.0
+        self._load_checkpoint(target_cycles)
+        self._session_start_cycle_count = self.cycle_count
+        self._emit_all_rows()
+        if self.smu is not None and self.procedure.pre_start_vth and self.cycle_count == 0:
+            self.status = 'pre-run Vth'
+            self._emit_all_rows()
+            if self._run_with_retries(self._measure_vth_all_duts, 'pre-run Vth measurement'):
+                self._save_checkpoint(target_cycles)
+                self._emit_all_rows()
 
-        while not self._stop_event.is_set() and not self.procedure.should_stop():
-            now = time.time()
+        while self.cycle_count < target_cycles:
+            if self._stop_requested():
+                self.status = 'manual shutdown requested'
+                break
 
-            # ---- periodic telemetry log ----
-            if now - last_log_time >= log_interval:
+            remaining = target_cycles - self.cycle_count
+            planned_cycles = int(self.cfg.freq_hz * batch_duration_s)
+            batch_cycles = max(1, min(remaining, planned_cycles, self._MAX_FIRMWARE_BATCH_CYCLES))
+
+            self._select_dut_for_measurement(0)
+            self.status = 'switching'
+            self.batch_number += 1
+            log.info(
+                f'[{self.cfg.id}] Batch {self.batch_number}: '
+                f'{batch_cycles} cycles at {self.cfg.freq_hz:.0f} Hz'
+            )
+
+            completed = self._run_batch_with_recovery(batch_cycles)
+            if completed is None:
+                break
+
+            self.cycle_count = max(self.cycle_count, completed)
+            self.status = 'between batches'
+            self._refresh_telemetry_with_recovery()
+            self._save_checkpoint(target_cycles)
+            self._emit_all_rows()
+
+            if self.smu is not None and time.time() - last_vth_time >= vth_interval:
+                self.status = 'measuring Vth'
+                if self._run_with_retries(self._measure_vth_all_duts, 'Vth measurement'):
+                    last_vth_time = time.time()
+                    self._save_checkpoint(target_cycles)
+                    self._emit_all_rows()
+
+        if self.smu is not None and self.procedure.post_shutdown_vth:
+            self.status = 'post-run Vth'
+            self._emit_all_rows()
+            self._allow_post_stop_work = True
+            try:
+                self._run_with_retries(self._measure_vth_all_duts, 'post-run Vth measurement')
+            finally:
+                self._allow_post_stop_work = False
+            self._save_checkpoint(target_cycles)
+            self._emit_all_rows()
+
+        if self.cycle_count >= target_cycles:
+            self.status = 'complete'
+        elif self._stop_requested():
+            self.status = 'manual shutdown complete'
+        self._emit_all_rows()
+
+    def _run_batch_with_recovery(self, batch_cycles: int) -> Optional[int]:
+        # Progress within this batch is only an estimate (elapsed time ×
+        # freq_hz) since the firmware only updates its cycle counter once,
+        # when the whole batch finishes. Baseline it against this run's
+        # cycle count as of the start of this specific batch, so retries of
+        # the same batch don't double-count.
+        batch_start_cycle_count = self.cycle_count
+
+        def _report_progress(estimated_cycles_in_batch: int):
+            self.cycle_count = max(
+                self.cycle_count, batch_start_cycle_count + estimated_cycles_in_batch
+            )
+            self._emit_all_rows()
+
+        for attempt in range(1, int(self.procedure.hardware_retry_count) + 1):
+            try:
+                completed = self.controller.run_batch(
+                    cycles=batch_cycles,
+                    freq_hz=self.cfg.freq_hz,
+                    duty_cycle=self.cfg.duty_cycle,
+                    should_stop=self._stop_requested,
+                    on_progress=_report_progress,
+                )
+                if completed is None:
+                    raise RuntimeError('GSS_test returned no cycle count')
+                self.last_error = ''
+                return self._absolute_cycle_count(completed)
+            except Exception as exc:
+                self.last_error = str(exc)
+                self.status = f'batch retry {attempt}'
+                log.warning(f'[{self.cfg.id}] Batch failed (attempt {attempt}): {exc}')
+                self._emit_all_rows()
+                if self._sleep_interruptible(float(self.procedure.hardware_retry_delay_s)):
+                    return None
+
+        while not self._stop_requested():
+            self.status = 'waiting for operator'
+            log.error(
+                f'[{self.cfg.id}] Batch failed after retries; waiting for operator intervention. '
+                f'Last error: {self.last_error}'
+            )
+            self._emit_all_rows()
+            if self._sleep_interruptible(float(self.procedure.operator_retry_wait_s)):
+                return None
+            for attempt in range(1, int(self.procedure.hardware_retry_count) + 1):
                 try:
-                    self._update_cycle_count()
-                    self._update_psu_readings()
-                    self._update_temperature()
+                    completed = self.controller.run_batch(
+                        cycles=batch_cycles,
+                        freq_hz=self.cfg.freq_hz,
+                        duty_cycle=self.cfg.duty_cycle,
+                        should_stop=self._stop_requested,
+                        on_progress=_report_progress,
+                    )
+                    if completed is None:
+                        raise RuntimeError('GSS_test returned no cycle count')
+                    self.last_error = ''
+                    return self._absolute_cycle_count(completed)
                 except Exception as exc:
-                    log.warning(f'[{self.cfg.id}] Telemetry read error: {exc}')
                     self.last_error = str(exc)
+                    log.warning(f'[{self.cfg.id}] Operator retry failed (attempt {attempt}): {exc}')
+                    if self._sleep_interruptible(float(self.procedure.hardware_retry_delay_s)):
+                        return None
+        return None
 
-                for dut in range(1, self.cfg.num_duts + 1):
-                    self._emit_row(dut=dut)
-                last_log_time = now
+    def _refresh_telemetry_with_recovery(self):
+        self._run_with_retries(self._update_cycle_count, 'cycle count read')
+        self._run_with_retries(self._update_psu_readings, 'PSU readback')
+        self._run_with_retries(self._update_temperature, 'TCU readback')
 
-            # ---- periodic Vth measurement ----
-            if self.smu is not None and (now - last_vth_time >= vth_interval):
+    def _run_with_retries(self, func, label: str) -> bool:
+        for attempt in range(1, int(self.procedure.hardware_retry_count) + 1):
+            if self._stop_requested():
+                return False
+            try:
+                func()
+                self.last_error = ''
+                return True
+            except Exception as exc:
+                self.last_error = str(exc)
+                self.status = f'{label} retry {attempt}'
+                log.warning(f'[{self.cfg.id}] {label} failed (attempt {attempt}): {exc}')
+                self._emit_all_rows()
+                if self._sleep_interruptible(float(self.procedure.hardware_retry_delay_s)):
+                    return False
+
+        while not self._stop_requested():
+            self.status = 'waiting for operator'
+            log.error(
+                f'[{self.cfg.id}] {label} failed after retries; waiting for operator intervention. '
+                f'Last error: {self.last_error}'
+            )
+            self._emit_all_rows()
+            if self._sleep_interruptible(float(self.procedure.operator_retry_wait_s)):
+                return False
+            for attempt in range(1, int(self.procedure.hardware_retry_count) + 1):
+                if self._stop_requested():
+                    return False
                 try:
-                    self._measure_vth_all_duts()
+                    func()
+                    self.last_error = ''
+                    return True
                 except Exception as exc:
-                    log.warning(f'[{self.cfg.id}] Vth measurement error: {exc}')
                     self.last_error = str(exc)
-                last_vth_time = now
+                    log.warning(f'[{self.cfg.id}] {label} operator retry failed (attempt {attempt}): {exc}')
+                    if self._sleep_interruptible(float(self.procedure.hardware_retry_delay_s)):
+                        return False
+        return False
 
-            time.sleep(self._MIN_SLEEP_S)
+    def _stop_requested(self) -> bool:
+        if self._allow_post_stop_work:
+            return False
+        return self._stop_event.is_set() or self.procedure.should_stop()
 
-        # ---- shutdown ----
+    def _sleep_interruptible(self, seconds: float) -> bool:
+        deadline = time.time() + max(0.0, seconds)
+        while time.time() < deadline:
+            if self._stop_requested():
+                return True
+            time.sleep(min(self._MIN_SLEEP_S, deadline - time.time()))
+        return self._stop_requested()
+
+    def _emit_all_rows(self):
+        for dut in range(1, self.cfg.num_duts + 1):
+            self._emit_row(dut=dut)
+
+    def _load_checkpoint(self, target_cycles: int):
+        if not self.checkpoint_path or not os.path.exists(self.checkpoint_path):
+            return
         try:
-            self._stop_switching()
+            with open(self.checkpoint_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            if int(data.get('target_cycles', target_cycles)) != target_cycles:
+                log.warning(f'[{self.cfg.id}] Ignoring checkpoint with different target cycle count')
+                return
+            self.cycle_count = int(data.get('cycle_count', self.cycle_count))
+            self.batch_number = int(data.get('batch_number', self.batch_number))
+            log.info(f'[{self.cfg.id}] Resumed checkpoint at {self.cycle_count} cycles')
         except Exception as exc:
-            log.warning(f'[{self.cfg.id}] Stop error: {exc}')
+            log.warning(f'[{self.cfg.id}] Could not load checkpoint: {exc}')
 
-        self.status = 'stopped'
-        log.info(f'[{self.cfg.id}] Worker stopped')
+    def _save_checkpoint(self, target_cycles: Optional[int] = None):
+        if not self.checkpoint_path:
+            return
+        data = {
+            'controller': self.cfg.id,
+            'cycle_count': self.cycle_count,
+            'target_cycles': target_cycles if target_cycles is not None else int(getattr(self.procedure, 'target_cycles', 0)),
+            'batch_number': self.batch_number,
+            'status': self.status,
+            'last_error': self.last_error,
+            'saved_at': datetime.now().isoformat(timespec='seconds'),
+        }
+        tmp = self.checkpoint_path + '.tmp'
+        try:
+            with open(tmp, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2)
+            os.replace(tmp, self.checkpoint_path)
+        except Exception as exc:
+            log.warning(f'[{self.cfg.id}] Checkpoint save failed: {exc}')
 
     # ------------------------------------------------------------------
     # Hardware interactions
@@ -359,6 +504,25 @@ class GSSWorker:
                 f'Failed to connect to GSS controller on {self.cfg.port}'
             )
         log.info(f'[{self.cfg.id}] GSS controller connected on {self.cfg.port}')
+
+    def _capture_cycle_baseline(self):
+        """Snapshot the firmware's raw (lifetime) cycle count right after
+        connecting, so later raw counts can be converted into this run's own
+        cycle count via :meth:`_absolute_cycle_count`. GSS_cycles never
+        resets on its own -- it accumulates across every batch ever run on
+        the controller since it was last powered on/reset.
+        """
+        baseline = None
+        try:
+            baseline = self.controller.get_cycle_count()
+        except Exception as exc:
+            log.warning(f'[{self.cfg.id}] Could not read initial cycle count baseline: {exc}')
+        self._cycle_baseline = baseline if baseline is not None else 0
+
+    def _absolute_cycle_count(self, raw_count: int) -> int:
+        """Convert a raw firmware (lifetime) cycle count into this run's
+        logical cycle count."""
+        return self._session_start_cycle_count + max(0, raw_count - self._cycle_baseline)
 
     def _apply_psu_voltages(self):
         if self.psu is None:
@@ -392,29 +556,6 @@ class GSSWorker:
         except Exception as exc:
             log.warning(f'[{self.cfg.id}] TCU setup failed: {exc}')
 
-    def _configure_switching(self):
-        try:
-            self.controller.configure(self.cfg.freq_hz, self.cfg.duty_cycle)
-            log.info(
-                f'[{self.cfg.id}] Switching configured: '
-                f'{self.cfg.freq_hz:.0f} Hz, DC={self.cfg.duty_cycle:.3f}'
-            )
-        except NotImplementedError:
-            log.warning(
-                f'[{self.cfg.id}] configure() is TBD – '
-                'skipping switching configuration (simulation mode)'
-            )
-
-    def _start_switching(self):
-        try:
-            self.controller.start()
-            log.info(f'[{self.cfg.id}] Switching started')
-        except NotImplementedError:
-            log.warning(
-                f'[{self.cfg.id}] start() is TBD – '
-                'running in simulation mode (no actual switching)'
-            )
-
     def _stop_switching(self):
         if self.controller is None:
             return
@@ -429,24 +570,44 @@ class GSSWorker:
         try:
             count = self.controller.get_cycle_count()
             if count is not None:
-                self.cycle_count = count
+                self.cycle_count = max(self.cycle_count, self._absolute_cycle_count(count))
+            else:
+                raise RuntimeError('GSS_cycles returned no parseable cycle count')
         except NotImplementedError:
             pass  # TBD – silently ignore until firmware ready
         except Exception as exc:
             log.warning(f'[{self.cfg.id}] cycle count read error: {exc}')
+            raise
 
     def _update_psu_readings(self):
-        if self.psu is None:
+        if self.psu is not None:
+            try:
+                with self.psu_lock:
+                    v_on = self.psu.get_voltage_setpoint(self.cfg.psu_ch_pos)
+                    v_off_raw = self.psu.get_voltage_setpoint(self.cfg.psu_ch_neg)
+                if v_on is None or v_off_raw is None:
+                    raise RuntimeError('PSU returned incomplete voltage readback')
+                self.last_v_on = v_on
+                # PSU ch_neg supplies the absolute value; negate to get gate-off
+                self.last_v_off = -v_off_raw
+            except Exception as exc:
+                log.warning(f'[{self.cfg.id}] PSU readback error: {exc}')
+                raise
             return
+
+        # No external PSU configured -- fall back to the GSS controller's own
+        # onboard gate-supply-rail measurement (measure_supply / ADC5).
         try:
-            with self.psu_lock:
-                v_on = self.psu.get_voltage_setpoint(self.cfg.psu_ch_pos)
-                v_off_raw = self.psu.get_voltage_setpoint(self.cfg.psu_ch_neg)
-            self.last_v_on = v_on
-            # PSU ch_neg supplies the absolute value; negate to get gate-off
-            self.last_v_off = -v_off_raw if v_off_raw is not None else None
+            v_pos, v_neg = self.controller.get_output_voltages()
+            if v_pos is None or v_neg is None:
+                raise RuntimeError('Controller returned no supply voltage reading')
+            self.last_v_on = v_pos
+            self.last_v_off = v_neg
+        except NotImplementedError:
+            pass
         except Exception as exc:
-            log.warning(f'[{self.cfg.id}] PSU readback error: {exc}')
+            log.warning(f'[{self.cfg.id}] Controller supply readback error: {exc}')
+            raise
 
     def _update_temperature(self):
         if self.tcu is None:
@@ -455,66 +616,82 @@ class GSSWorker:
             t = self.tcu.get_temperature(self.cfg.tcu_channel)
             if t is not None and not math.isnan(t):
                 self.last_temperature = t
+            else:
+                raise RuntimeError('TCU returned no valid temperature')
         except Exception as exc:
             log.warning(f'[{self.cfg.id}] TCU read error: {exc}')
+            raise
 
     def _select_dut_for_measurement(self, dut: int):
         """Route DUT *dut* to the SMU.  Silently skipped while TBD."""
         try:
             self.controller.select_dut(dut)
+            time.sleep(self._DUT_RELAY_SETTLE_S)
         except NotImplementedError:
             pass  # DUT MUX command is TBD
 
     def _measure_vth_all_duts(self):
         """Measure Vth for every DUT, one at a time, via the shared SMU."""
-        force_current = self.cfg.vth_force_current_ua * 1e-6
+        vth_current = self.cfg.vth_current_ma * 1e-3
         compliance = self.cfg.vth_compliance_voltage
         method = self.cfg.vth_method
         precond_v = self.cfg.vth_precond_voltage
-        threshold_i = self.cfg.vth_threshold_current
+        threshold_i = vth_current
 
-        for dut in range(1, self.cfg.num_duts + 1):
-            self._select_dut_for_measurement(dut)
+        try:
+            for dut in range(1, self.cfg.num_duts + 1):
+                if self._stop_requested():
+                    raise RuntimeError('Vth measurement interrupted by stop request')
+                self._select_dut_for_measurement(dut)
 
-            vth: Optional[float] = None
-            for attempt in range(1, 4):  # up to 3 attempts
-                acquired = self.smu_lock.acquire(timeout=30.0)
-                if acquired:
-                    try:
-                        # Apply precondition voltage first
-                        if precond_v != 0.0:
-                            self.smu.apply_precondition_voltage(
-                                precond_voltage_v=precond_v,
-                                duration_s=0.1,
-                            )
-                        # Measure Vth
-                        if method == 'ramp_voltage':
-                            vth = self.smu.measure_vth_ramp(
-                                start_voltage_v=precond_v,
-                                stop_voltage_v=compliance,
-                                step_voltage_v=0.05,
-                                threshold_current_a=threshold_i,
-                            )
-                        else:  # force_current (default)
-                            vth = self.smu.measure_vth(
-                                force_current_a=force_current,
-                                compliance_voltage_v=compliance,
-                            )
-                    finally:
-                        self.smu_lock.release()
-                    break
+                vth: Optional[float] = None
+                for attempt in range(1, 4):  # up to 3 attempts
+                    acquired = False
+                    deadline = time.time() + 30.0
+                    while time.time() < deadline and not self._stop_requested():
+                        acquired = self.smu_lock.acquire(timeout=1.0)
+                        if acquired:
+                            break
+                    if acquired:
+                        try:
+                            if method == 'ramp_voltage':
+                                vth = self.smu.measure_vth_ramp(
+                                    precondition_voltage_v=precond_v,
+                                    start_voltage_v=self.cfg.vth_ramp_start_voltage,
+                                    stop_voltage_v=self.cfg.vth_ramp_stop_voltage,
+                                    step_voltage_v=self.cfg.vth_ramp_step_voltage,
+                                    threshold_current_a=threshold_i,
+                                )
+                            else:
+                                self.smu.apply_precondition_voltage(
+                                    precond_voltage_v=precond_v,
+                                    duration_s=0.1,
+                                )
+                                vth = self.smu.measure_vth(
+                                    force_current_a=vth_current,
+                                    compliance_voltage_v=compliance,
+                                )
+                        finally:
+                            self.smu_lock.release()
+                        break
+                    else:
+                        if self._stop_requested():
+                            raise RuntimeError('Vth measurement interrupted by stop request')
+                        log.warning(
+                            f'[{self.cfg.id}] DUT {dut}: SMU busy, '
+                            f'retry {attempt}/3 in 30 s'
+                        )
+                        if self._sleep_interruptible(30.0):
+                            raise RuntimeError('Vth measurement interrupted by stop request')
+
+                if vth is not None:
+                    self.last_vth[dut] = vth
+                    log.info(f'[{self.cfg.id}] DUT {dut} Vth = {vth:.4f} V')
                 else:
-                    log.warning(
-                        f'[{self.cfg.id}] DUT {dut}: SMU busy, '
-                        f'retry {attempt}/3 in 30 s'
-                    )
-                    time.sleep(30.0)
-
-            if vth is not None:
-                self.last_vth[dut] = vth
-                log.info(f'[{self.cfg.id}] DUT {dut} Vth = {vth:.4f} V')
-            else:
-                log.warning(f'[{self.cfg.id}] DUT {dut} Vth measurement failed')
+                    log.warning(f'[{self.cfg.id}] DUT {dut} Vth measurement failed')
+                    raise RuntimeError(f'DUT {dut} Vth measurement failed')
+        finally:
+            self._select_dut_for_measurement(0)
 
     # ------------------------------------------------------------------
     # Result emission
@@ -539,7 +716,9 @@ class GSSWorker:
             'V_off (V)': (
                 self.last_v_off if self.last_v_off is not None else float('nan')
             ),
+            'Batch': self.batch_number,
             'Status': self.status,
+            'Last Error': self.last_error,
         }
         self.result_queue.put(row)
 
@@ -551,15 +730,16 @@ class GSSWorker:
 class GateStressTest(Procedure):
     """Gate Switching Stress test procedure.
 
-    Manages N GSS controllers simultaneously via worker threads.
+    Manages exactly one GSS controller via a background worker thread. To
+    stress multiple controllers at once, queue one GSS experiment per
+    controller.
     """
 
     name = 'Gate Switching Stress (GSS)'
     internal_name = 'Gate_Switching_Stress'
     short_name = 'GSS'
     description = (
-        'Long-duration gate switching stress test. '
-        'Manages multiple GSS controllers simultaneously, '
+        'Long-duration gate switching stress test on one GSS controller, '
         'with optional SMU Vth measurement, PSU control, and temperature control.'
     )
 
@@ -592,20 +772,31 @@ class GateStressTest(Procedure):
 
     vth_method = ListParameter(
         'Vth Method',
-        choices=['force_current', 'ramp_voltage'],
+        choices=['ramp_voltage', 'force_current'],
+        default='ramp_voltage',
     )
-    vth_force_current_ua = FloatParameter(
-        'Vth Force Current', units='µA',
-        default=250.0, minimum=0.1, maximum=10_000.0,
+    vth_current_ma = FloatParameter(
+        'Vth Current', units='mA',
+        default=1.0, minimum=0.001, maximum=1000.0,
     )
     vth_precond_voltage = FloatParameter(
         'Vth Precondition Voltage', units='V',
+        default=15.0, minimum=0.0, maximum=30.0,
+    )
+    vth_ramp_start_voltage = FloatParameter(
+        'Vth Ramp Start Voltage', units='V',
+        default=6.0, minimum=0.0, maximum=30.0,
+    )
+    vth_ramp_stop_voltage = FloatParameter(
+        'Vth Ramp Stop Voltage', units='V',
         default=0.0, minimum=0.0, maximum=30.0,
     )
-    vth_threshold_current_na = FloatParameter(
-        'Vth Threshold Current', units='nA',
-        default=1000.0, minimum=0.001, maximum=1e6,
+    vth_ramp_step_voltage = FloatParameter(
+        'Vth Ramp Step Size', units='V',
+        default=0.05, minimum=0.001, maximum=10.0,
     )
+    # vth_current_ma is used as both force current (force_current mode) and
+    # threshold current (ramp_voltage mode).
     vth_compliance_voltage = FloatParameter(
         'Vth Compliance Voltage', units='V',
         default=10.0, minimum=0.1, maximum=30.0,
@@ -642,41 +833,55 @@ class GateStressTest(Procedure):
 
     # ---- Timing -----------------------------------------------------------
 
+    # FloatParameter is used (instead of IntegerParameter) so the GUI input
+    # accepts scientific notation (e.g. "1e12"); Qt's integer spin box is
+    # also limited to 32-bit values, which is far too small for cycle counts.
+    target_cycles = FloatParameter(
+        'Target Cycles', default=1_000_000_000, minimum=1, maximum=1e15,
+    )
+    batch_duration_min = FloatParameter(
+        'Batch Duration', units='min',
+        default=60.0, minimum=0.1, maximum=1440.0,
+    )
+
     log_interval_s = IntegerParameter(
         'Log Interval', units='s',
         default=60, minimum=10, maximum=3600,
     )
     vth_interval_min = IntegerParameter(
         'Vth Measurement Interval', units='min',
-        default=60, minimum=5, maximum=1440,
+        default=360, minimum=5, maximum=10080,
+    )
+    pre_start_vth = BooleanParameter(
+        'Pre-run Vth Measurement', default=True,
+    )
+    post_shutdown_vth = BooleanParameter(
+        'Post-run Vth Measurement', default=True,
     )
 
     # ---- Misc -------------------------------------------------------------
 
+    hardware_retry_count = IntegerParameter(
+        'Hardware Retry Count', default=3, minimum=1, maximum=10,
+    )
+    hardware_retry_delay_s = IntegerParameter(
+        'Hardware Retry Delay', units='s', default=30, minimum=1, maximum=3600,
+    )
+    operator_retry_wait_s = IntegerParameter(
+        'Operator Retry Wait', units='s', default=300, minimum=10, maximum=86400,
+    )
     worker_shutdown_timeout_s = IntegerParameter(
         'Worker Shutdown Timeout', units='s',
-        default=15, minimum=5, maximum=60,
-    )
-    data_directory = Parameter(
-        'Data Directory',
-        default=os.path.join('data', 'GSS'),
+        default=120, minimum=5, maximum=7200,
     )
     nas_directory = Parameter(
-        'NAS Directory (optional)',
+        'NAS Backup Directory (optional)',
         default='',
     )
 
-    # How often (seconds) local CSV files are copied to the NAS.
+    # How often (seconds) the Results file is mirrored to the NAS.
     # Syncs run in a background thread so they never block the stress test.
     _NAS_SYNC_INTERVAL_S: int = 3600
-
-    # ---- Advanced: multi-controller JSON (optional) ----------------------
-    # Leave empty to use the individual parameters above.
-    # Provide a JSON array of ControllerConfig dicts to run N controllers.
-    controller_config_json = Parameter(
-        'Controller Configuration (JSON, advanced)',
-        default='',
-    )
 
     # -----------------------------------------------------------------------
 
@@ -689,34 +894,64 @@ class GateStressTest(Procedure):
         'Temperature (°C)',
         'V_on (V)',
         'V_off (V)',
+        'Batch',
         'Status',
+        'Last Error',
     ]
 
+    # String-valued columns that cannot be plotted; APS GUI.py removes these
+    # from the plot's X/Y axis dropdowns so selecting them can't error out.
+    NON_PLOTTABLE_COLUMNS = ['Controller', 'Status', 'Last Error']
+
     INPUTS = [
-        'smu_serial',
+        # ---- GSS Controller ----
         'gss_serial',
         'num_duts',
         'freq_hz',
         'duty_cycle',
+        # ---- SMU (Vth Measurement) ----
+        'smu_serial',
         'vth_method',
-        'vth_force_current_ua',
+        'vth_current_ma',
         'vth_precond_voltage',
-        'vth_threshold_current_na',
+        'vth_ramp_start_voltage',
+        'vth_ramp_stop_voltage',
+        'vth_ramp_step_voltage',
         'vth_compliance_voltage',
+        'vth_interval_min',
+        'pre_start_vth',
+        'post_shutdown_vth',
+        # ---- PSU (Gate Drive) ----
         'psu_serial',
         'psu_ch_pos',
         'psu_ch_neg',
         'v_gate_on',
         'v_gate_off',
+        # ---- TCU (Temperature) ----
         'tcu_serial',
         'tcu_channel',
         'temperature_c',
+        # ---- General Settings ----
+        'target_cycles',
+        'batch_duration_min',
         'log_interval_s',
-        'vth_interval_min',
-        'data_directory',
+        'hardware_retry_count',
+        'hardware_retry_delay_s',
+        'operator_retry_wait_s',
         'nas_directory',
     ]
     DISPLAYS = INPUTS
+
+    # Section headline shown above the first input of each group in the GUI.
+    # Consumed by APS GUI.py's compact input-panel layout (generic; any
+    # procedure can define this).
+    INPUT_SECTIONS = {
+        'gss_serial': 'GSS Controller',
+        'smu_serial': 'SMU (Vth Measurement)',
+        'psu_serial': 'PSU (Gate Drive)',
+        'tcu_serial': 'TCU (Temperature)',
+        'target_cycles': 'General Settings',
+    }
 
     X_AXIS = 'Timestamp'
     Y_AXIS = 'Vth (V)'
@@ -772,61 +1007,58 @@ class GateStressTest(Procedure):
         """Parse configuration, connect all shared hardware."""
         self._workers: List[GSSWorker] = []
         self._result_queue: queue.Queue = queue.Queue()
-        self._csv_handles: Dict[str, Any] = {}      # ctrl_id → {'file': …, 'writer': …}
-        self._local_csv_paths: Dict[str, str] = {}  # ctrl_id → absolute local path
 
-        # CSVs are written to a local temp directory to avoid blocking on NAS
-        # latency.  Contents are periodically copied to data_directory and
-        # optionally to nas_directory.
-        self._local_cache_dir: str = tempfile.mkdtemp(prefix='gss_cache_')
-        log.info(f'GSS local cache: {self._local_cache_dir}')
+        # The GUI (APS GUI.py) computes the exact path of pymeasure's own
+        # Results CSV before queuing this procedure and stores it here, so
+        # this run's checkpoint file can sit next to it and both can be
+        # mirrored to nas_directory. Left empty if "Save data" is unchecked.
+        self._results_filepath: str = getattr(self, 'results_filepath', '') or ''
+        self._checkpoint_path: str = ''
+        if self._results_filepath:
+            base, _ext = os.path.splitext(self._results_filepath)
+            self._checkpoint_path = base + '.checkpoint.json'
+        log.info(f'GSS Results file: {self._results_filepath or "(not saved)"}')
 
         self._last_nas_sync: float = time.monotonic()
         self._sync_thread: Optional[threading.Thread] = None
 
         self._apply_connection_parameters()
 
-        # Build controller config list.
-        # If controller_config_json is provided, parse it (multi-controller advanced mode).
-        # Otherwise build a single ControllerConfig from the individual parameters.
-        raw_json = (self.controller_config_json or '').strip()
-        if raw_json and raw_json not in ('[]', '{}'):
-            self._configs: List[ControllerConfig] = self._parse_configs()
-        else:
-            # Resolve serial numbers → actual connection strings via device registry.
-            # Fallback: use the serial string directly (allows manual entry).
-            _gss_info = _DEVICE_REGISTRY.get(self.gss_serial, {})
-            _psu_info = _DEVICE_REGISTRY.get(self.psu_serial, {})
-            _tcu_info = _DEVICE_REGISTRY.get(self.tcu_serial, {})
-            _gss_port    = _gss_info.get('port',     self.gss_serial)
-            _psu_res     = _psu_info.get('resource', self.psu_serial)
-            _tcu_port    = _tcu_info.get('port',     self.tcu_serial)
-            self._configs = [ControllerConfig(
-                id='Ctrl1',
-                port=_gss_port,
-                gss_serial=self.gss_serial,
-                num_duts=self.num_duts,
-                freq_hz=self.freq_hz,
-                duty_cycle=self.duty_cycle,
-                vth_method=self.vth_method,
-                vth_force_current_ua=self.vth_force_current_ua,
-                vth_precond_voltage=self.vth_precond_voltage,
-                vth_threshold_current=self.vth_threshold_current_na * 1e-9,
-                vth_compliance_voltage=self.vth_compliance_voltage,
-                psu_resource=_psu_res,
-                psu_serial=self.psu_serial,
-                psu_ch_pos=self.psu_ch_pos,
-                psu_ch_neg=self.psu_ch_neg,
-                v_gate_on=self.v_gate_on,
-                v_gate_off=self.v_gate_off,
-                tcu_port=_tcu_port,
-                tcu_serial=self.tcu_serial,
-                tcu_channel=self.tcu_channel,
-                temperature_c=self.temperature_c,
-            )]
-
-        if not self._configs:
-            log.warning('No controller configurations found; procedure will run with no controllers.')
+        # Build the (single) controller config from the individual parameters.
+        # Resolve serial numbers → actual connection strings via device registry.
+        # Fallback: use the serial string directly (allows manual entry).
+        _gss_info = _DEVICE_REGISTRY.get(self.gss_serial, {})
+        _psu_info = _DEVICE_REGISTRY.get(self.psu_serial, {})
+        _tcu_info = _DEVICE_REGISTRY.get(self.tcu_serial, {})
+        _gss_port    = _gss_info.get('port',     self.gss_serial)
+        _psu_res     = _psu_info.get('resource', self.psu_serial)
+        _tcu_port    = _tcu_info.get('port',     self.tcu_serial)
+        self._configs = [ControllerConfig(
+            id='Ctrl1',
+            port=_gss_port,
+            gss_serial=self.gss_serial,
+            num_duts=self.num_duts,
+            freq_hz=self.freq_hz,
+            duty_cycle=self.duty_cycle,
+            vth_method=self.vth_method,
+            vth_current_ma=self.vth_current_ma,
+            vth_precond_voltage=self.vth_precond_voltage,
+            vth_ramp_start_voltage=self.vth_ramp_start_voltage,
+            vth_ramp_stop_voltage=self.vth_ramp_stop_voltage,
+            vth_ramp_step_voltage=self.vth_ramp_step_voltage,
+            vth_threshold_current=self.vth_current_ma * 1e-3,
+            vth_compliance_voltage=self.vth_compliance_voltage,
+            psu_resource=_psu_res,
+            psu_serial=self.psu_serial,
+            psu_ch_pos=self.psu_ch_pos,
+            psu_ch_neg=self.psu_ch_neg,
+            v_gate_on=self.v_gate_on,
+            v_gate_off=self.v_gate_off,
+            tcu_port=_tcu_port,
+            tcu_serial=self.tcu_serial,
+            tcu_channel=self.tcu_channel,
+            temperature_c=self.temperature_c,
+        )]
 
         # Connect shared SMU — resolve serial number → VISA resource
         self._smu = None
@@ -864,11 +1096,7 @@ class GateStressTest(Procedure):
         # Set PSU voltages / TCU temperatures and verify before switching starts
         self._verify_hardware_setup()
 
-        # Ensure data directory exists
-        os.makedirs(self.data_directory, exist_ok=True)
-
         # Build workers
-        run_ts = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
         for cfg in self._configs:
             psu = self._psu_pool.get(cfg.psu_resource)
             psu_lock = self._psu_locks.get(cfg.psu_resource, threading.Lock())
@@ -882,9 +1110,8 @@ class GateStressTest(Procedure):
                 psu=psu,
                 psu_lock=psu_lock,
                 tcu=tcu,
+                checkpoint_path=self._checkpoint_path,
             )
-            # Open per-controller CSV in local cache dir
-            self._open_controller_csv(cfg.id, run_ts)
             self._workers.append(worker)
 
         log.info(f'GSS startup complete: {len(self._workers)} controller(s) configured')
@@ -900,11 +1127,12 @@ class GateStressTest(Procedure):
             worker.start()
 
         log.info('All GSS workers started')
+        stop_requested = False
+        target_cycles = max(1.0, float(self.target_cycles))
 
         # Main loop: drain result queue and forward rows to pymeasure + CSV
         while True:
             # Drain any available rows
-            drained_any = False
             while True:
                 try:
                     row = self._result_queue.get_nowait()
@@ -912,8 +1140,11 @@ class GateStressTest(Procedure):
                     break
 
                 self.emit('results', row)
-                self._write_controller_csv(row['Controller'], row)
-                drained_any = True
+
+            # Report overall progress (pymeasure otherwise only shows 0% and
+            # 100%, since nothing else in this procedure emits 'progress').
+            done = sum(w.cycle_count for w in self._workers)
+            self.emit('progress', max(0.0, min(100.0, 100.0 * done / target_cycles)))
 
             # Periodic NAS sync (non-blocking background thread)
             if time.monotonic() - self._last_nas_sync >= self._NAS_SYNC_INTERVAL_S:
@@ -921,8 +1152,11 @@ class GateStressTest(Procedure):
 
             # Check stop conditions
             if self.should_stop():
-                log.info('GSS abort requested')
-                break
+                if not stop_requested:
+                    log.info('GSS manual shutdown requested; waiting for workers to reach batch boundary')
+                    for worker in self._workers:
+                        worker._stop_event.set()
+                    stop_requested = True
 
             # If all workers have exited naturally, we are done
             if all(not w.is_alive for w in self._workers):
@@ -936,7 +1170,6 @@ class GateStressTest(Procedure):
             while True:
                 row = self._result_queue.get_nowait()
                 self.emit('results', row)
-                self._write_controller_csv(row['Controller'], row)
         except queue.Empty:
             pass
 
@@ -984,15 +1217,7 @@ class GateStressTest(Procedure):
             except Exception as exc:
                 log.warning(f'SMU disconnect error: {exc}')
 
-        # Close CSV files
-        for ctrl_id, handle in self._csv_handles.items():
-            try:
-                handle['file'].close()
-                log.debug(f'Closed CSV for {ctrl_id}')
-            except Exception:
-                pass
-
-        # Final sync: copy closed CSVs to data_directory and NAS
+        # Final sync: mirror the Results file (and checkpoint) to the NAS
         self._sync_to_nas(final=True)
 
         log.info('GSS shutdown complete')
@@ -1172,7 +1397,11 @@ class GateStressTest(Procedure):
                     log.info('All temperatures settled.')
                     break
 
-                time.sleep(30.0)
+                deadline_sleep = time.time() + 30.0
+                while time.time() < deadline_sleep:
+                    if self.should_stop():
+                        raise RuntimeError('Test aborted during temperature settling')
+                    time.sleep(min(1.0, deadline_sleep - time.time()))
             else:
                 # After full wait, do a final check and raise if way off
                 for cfg in self._configs:
@@ -1212,34 +1441,6 @@ class GateStressTest(Procedure):
                 d['serial']: d for d in discovered if d.get('serial')
             }
 
-    def _parse_configs(self) -> List[ControllerConfig]:
-        """Parse controller_config_json into a list of ControllerConfig objects."""
-        raw = self.controller_config_json or '[]'
-        try:
-            data = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            log.error(f'Invalid controller_config_json: {exc}')
-            return []
-
-        if not isinstance(data, list):
-            log.error('controller_config_json must be a JSON array')
-            return []
-
-        configs = []
-        for i, item in enumerate(data):
-            try:
-                cfg = ControllerConfig.from_dict(item)
-                configs.append(cfg)
-                log.info(
-                    f'Controller {cfg.id}: port={cfg.port}, '
-                    f'freq={cfg.freq_hz:.0f} Hz, DC={cfg.duty_cycle:.3f}, '
-                    f'V_on={cfg.v_gate_on} V, V_off={cfg.v_gate_off} V, '
-                    f'DUTs={cfg.num_duts}'
-                )
-            except Exception as exc:
-                log.error(f'Cannot parse controller config [{i}]: {exc}')
-
-        return configs
 
     def _connect_psu(self, resource: str):
         """Connect to a PSU and return the driver object, or None on failure."""
@@ -1276,90 +1477,51 @@ class GateStressTest(Procedure):
             return None
 
     # -----------------------------------------------------------------------
-    # Per-controller CSV file management
+    # NAS mirroring
     # -----------------------------------------------------------------------
 
-    def _open_controller_csv(self, ctrl_id: str, timestamp: str):
-        """Open (and write the header to) the CSV file for *ctrl_id*.
-
-        The file is created in the local cache directory to avoid blocking on
-        NAS latency.  It is copied to *data_directory* (and optionally
-        *nas_directory*) by :meth:`_sync_to_nas`.
-        """
-        safe_id = ctrl_id.replace(' ', '_').replace('/', '-')
-        filename = f'GSS_{safe_id}_{timestamp}.csv'
-        filepath = os.path.join(self._local_cache_dir, filename)
-        try:
-            f = open(filepath, 'w', newline='', encoding='utf-8')
-            writer = csv.DictWriter(f, fieldnames=self.DATA_COLUMNS)
-            writer.writeheader()
-            self._csv_handles[ctrl_id] = {'file': f, 'writer': writer}
-            self._local_csv_paths[ctrl_id] = filepath
-            log.info(f'Opened CSV for {ctrl_id}: {filepath}')
-        except Exception as exc:
-            log.error(f'Cannot open CSV for {ctrl_id}: {exc}')
-
-    def _write_controller_csv(self, ctrl_id: str, row: dict):
-        """Write one row to the per-controller CSV."""
-        handle = self._csv_handles.get(ctrl_id)
-        if handle is None:
-            return
-        try:
-            handle['writer'].writerow(row)
-            handle['file'].flush()
-        except Exception as exc:
-            log.warning(f'CSV write error ({ctrl_id}): {exc}')
-
     def _sync_to_nas(self, final: bool = False) -> None:
-        """Copy local cache CSVs to *data_directory* and *nas_directory*.
+        """Copy the Results file (and its checkpoint) to *nas_directory*.
+
+        The Results CSV itself is written directly by pymeasure to the local
+        Directory chosen in the GUI, so there is no separate local-cache copy
+        step. This just mirrors that one file (plus the checkpoint used to
+        resume after a crash/restart) to the NAS, when configured.
 
         When *final* is ``False`` the copy runs in a background thread so it
         never blocks the stress test.  When *final* is ``True`` (called from
-        :meth:`shutdown` after the CSV handles are already closed) the copy
-        runs synchronously so no data is lost on exit.
-
-        A background sync that is still running when a new interval fires is
-        silently skipped — the next interval will catch up.
+        :meth:`shutdown`) the copy runs synchronously so no data is lost on
+        exit.  A background sync that is still running when a new interval
+        fires is silently skipped — the next interval will catch up.
         """
-        if not self._local_csv_paths:
+        nas = (self.nas_directory or '').strip()
+        if not nas or not self._results_filepath:
             return
 
         if not final:
-            # Skip if a previous background sync is still in progress
             if self._sync_thread is not None and self._sync_thread.is_alive():
                 log.debug('NAS sync already in progress; skipping this interval')
                 return
 
-        destinations = [self.data_directory]
-        nas = (self.nas_directory or '').strip()
-        if nas:
-            destinations.append(nas)
+        sources = [self._results_filepath, self._checkpoint_path]
 
         def _do_sync():
-            for dest_dir in destinations:
-                try:
-                    os.makedirs(dest_dir, exist_ok=True)
-                except Exception as exc:
-                    log.warning(f'Cannot create sync destination {dest_dir!r}: {exc}')
+            try:
+                os.makedirs(nas, exist_ok=True)
+            except Exception as exc:
+                log.warning(f'Cannot create NAS directory {nas!r}: {exc}')
+                return
+            for src in sources:
+                if not src or not os.path.exists(src):
                     continue
-                for ctrl_id, local_path in list(self._local_csv_paths.items()):
-                    if not os.path.exists(local_path):
-                        continue
-                    # Flush before copying (handle may already be closed on final sync)
-                    handle = self._csv_handles.get(ctrl_id)
-                    if handle is not None:
-                        try:
-                            handle['file'].flush()
-                        except Exception:
-                            pass
-                    dest_path = os.path.join(dest_dir, os.path.basename(local_path))
-                    try:
-                        shutil.copy2(local_path, dest_path)
-                        log.debug(f'Synced {ctrl_id} → {dest_path}')
-                    except Exception as exc:
-                        log.warning(f'Sync failed ({ctrl_id} → {dest_dir!r}): {exc}')
+                dest = os.path.join(nas, os.path.basename(src))
+                try:
+                    shutil.copy2(src, dest)
+                    log.debug(f'Synced {src} → {dest}')
+                except Exception as exc:
+                    log.warning(f'NAS sync failed ({src} → {nas!r}): {exc}')
             self._last_nas_sync = time.monotonic()
-            log.info(f'NAS sync complete (destinations: {destinations})')
+            log.info(f'NAS sync complete ({nas})')
 
         if final:
             _do_sync()

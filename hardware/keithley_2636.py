@@ -334,6 +334,9 @@ class KeyithleySMU:
     def measure_vth_ramp(
         self,
         channel: str = 'a',
+        precondition_voltage_v: float = 15.0,
+        precondition_duration_s: float = 0.1,
+        break_time_s: float = 0.01,
         start_voltage_v: float = 0.0,
         stop_voltage_v: float = 10.0,
         step_voltage_v: float = 0.1,
@@ -363,15 +366,25 @@ class KeyithleySMU:
         if self._instr is None:
             log.error('SMU not connected')
             return None
-        if step_voltage_v <= 0:
-            step_voltage_v = 0.1
+        if step_voltage_v == 0:
+            step_voltage_v = 0.1 if stop_voltage_v >= start_voltage_v else -0.1
+        if stop_voltage_v > start_voltage_v and step_voltage_v < 0:
+            step_voltage_v = abs(step_voltage_v)
+        if stop_voltage_v < start_voltage_v and step_voltage_v > 0:
+            step_voltage_v = -step_voltage_v
         try:
             if self._family == self._FAMILY_TSP:
                 return self._ramp_vth_tsp(
-                    channel.lower(), start_voltage_v, stop_voltage_v,
-                    step_voltage_v, threshold_current_a,
+                    channel.lower(), precondition_voltage_v,
+                    precondition_duration_s, break_time_s,
+                    start_voltage_v, stop_voltage_v, step_voltage_v,
+                    threshold_current_a,
                 )
             else:
+                self.apply_precondition_voltage(
+                    precond_voltage_v=precondition_voltage_v,
+                    duration_s=precondition_duration_s,
+                )
                 return self._ramp_vth_scpi(
                     start_voltage_v, stop_voltage_v,
                     step_voltage_v, threshold_current_a,
@@ -383,32 +396,49 @@ class KeyithleySMU:
     def _ramp_vth_tsp(
         self,
         channel: str,
+        precondition_v: float,
+        precondition_s: float,
+        break_s: float,
         start_v: float, stop_v: float, step_v: float, threshold_i: float,
     ) -> Optional[float]:
-        """Voltage-ramp Vth via Lua/TSP (2636B, 2604B)."""
-        smu = f'smu{channel}'
-        # Build and run a TSP script that sweeps voltage and returns the
-        # first voltage at which |I| >= threshold.
+        """JEP183A-style Vth ramp via Lua/TSP using gate and drain channels."""
+        gate_channel = channel if channel in ('a', 'b') else 'a'
+        drain_channel = 'b' if gate_channel == 'a' else 'a'
+        gate = f'smu{gate_channel}'
+        drain = f'smu{drain_channel}'
+        source_limit_i = max(abs(threshold_i) * 100.0, 1e-3)
         script = (
-            f'{smu}.reset() '
-            f'{smu}.source.func = {smu}.OUTPUT_DCVOLTS '
-            f'{smu}.source.limiti = {abs(threshold_i) * 100:.6e} '
-            f'{smu}.measure.autorangei = {smu}.AUTORANGE_ON '
-            f'{smu}.source.output = {smu}.OUTPUT_ON '
+            f'{gate}.reset() {drain}.reset() '
+            f'{gate}.source.func = {gate}.OUTPUT_DCVOLTS '
+            f'{drain}.source.func = {drain}.OUTPUT_DCVOLTS '
+            f'{gate}.source.limiti = {source_limit_i:.6e} '
+            f'{drain}.source.limiti = {source_limit_i:.6e} '
+            f'{drain}.measure.autorangei = {drain}.AUTORANGE_ON '
+            f'{gate}.source.levelv = {precondition_v:.4f} '
+            f'{drain}.source.levelv = 0 '
+            f'{gate}.source.output = {gate}.OUTPUT_ON '
+            f'{drain}.source.output = {drain}.OUTPUT_ON '
+            f'delay({precondition_s:.6f}) '
+            f'{gate}.source.levelv = 0 '
+            f'delay({break_s:.6f}) '
             f'local vth = {stop_v:.4f} '
             f'local v = {start_v:.4f} '
-            f'while v <= {stop_v:.4f} do '
-            f'  {smu}.source.levelv = v '
+            f'local step = {step_v:.4f} '
+            f'while ((step > 0 and v <= {stop_v:.4f}) or (step < 0 and v >= {stop_v:.4f})) do '
+            f'  {gate}.source.levelv = v '
+            f'  {drain}.source.levelv = v '
             f'  delay(0.002) '
-            f'  local i = {smu}.measure.i() '
-            f'  if math.abs(i) >= {threshold_i:.6e} then '
+            f'  local i = {drain}.measure.i() '
+            f'  if ((step > 0 and math.abs(i) >= {threshold_i:.6e}) or '
+            f'      (step < 0 and math.abs(i) <= {threshold_i:.6e})) then '
             f'    vth = v '
             f'    break '
             f'  end '
-            f'  v = v + {step_v:.4f} '
+            f'  v = v + step '
             f'end '
-            f'{smu}.source.output = {smu}.OUTPUT_OFF '
-            f'{smu}.reset() '
+            f'{gate}.source.output = {gate}.OUTPUT_OFF '
+            f'{drain}.source.output = {drain}.OUTPUT_OFF '
+            f'{gate}.reset() {drain}.reset() '
             f'print(vth)'
         )
         raw = self._query(f'do {script} end')
@@ -434,7 +464,8 @@ class KeyithleySMU:
 
         v = start_v
         vth = stop_v
-        while v <= stop_v:
+        while ((step_v > 0 and v <= stop_v)
+               or (step_v < 0 and v >= stop_v)):
             self._write(f':SOUR:VOLT:LEV {v:.4f}')
             time.sleep(0.005)
             raw = self._query(':READ?')
@@ -442,7 +473,11 @@ class KeyithleySMU:
                 i_meas = float(raw.split(',')[0])
             except (ValueError, IndexError):
                 break
-            if abs(i_meas) >= threshold_i:
+            crossed = (
+                (step_v > 0 and abs(i_meas) >= threshold_i)
+                or (step_v < 0 and abs(i_meas) <= threshold_i)
+            )
+            if crossed:
                 vth = v
                 break
             v += step_v

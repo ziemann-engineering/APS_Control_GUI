@@ -130,11 +130,13 @@ The application is built on [pymeasure](https://pymeasure.readthedocs.io/), whic
 
 ### 4.2 Install Python Dependencies
 
-Clone or download the repository and install the required packages:
+Clone or download the repository and install the direct Python dependencies:
 
 ```bash
 pip install -r requirements.txt
 ```
+
+On Linux / Pi OS, use the deploy script instead of installing `PyQt5` via pip so the system package manager can provide it.
 
 For a pinned, reproducible environment on Python 3.8.9:
 
@@ -167,7 +169,16 @@ To verify: `dfu-util --version`
 
 > **Note:** `dfu-util` is only needed if you use the *Flash GSS Firmware* feature in the startup dialog. The rest of the GUI works without it.
 
-### 4.4 Launch the Application
+### 4.5 Deploy Scripts
+
+Use these helpers to install the OS-specific prerequisites and then the Python packages:
+
+- Windows: `deploy_windows.ps1`
+- Linux / Pi OS: `deploy_pi_os.sh`
+
+The Linux script installs `dfu-util` and `python3-pyqt5` from the OS package manager, then installs the remaining Python dependencies into a local virtual environment.
+
+### 4.6 Launch the Application
 
 ```bash
 python "APS GUI.py"
@@ -268,9 +279,9 @@ At the top of the window, a file path field controls where the CSV output is sav
 
 The **Save data** toggle must be enabled for data to be written to disk.
 
-### 7.8 Data Directory
+### 7.8 Local Directory
 
-Below the file field, a directory chooser sets the folder for output files. The selected directory is automatically remembered per-procedure in `settings.toml`.
+Below the file field, a directory chooser (labeled **Local Directory**) sets the folder for output files. The selected directory is automatically remembered per-procedure in `settings.toml`.
 
 ---
 
@@ -505,8 +516,7 @@ Below the file field, a directory chooser sets the folder for output files. The 
 | Temperature | °C | −40 – 250 | 25.0 | Target DUT temperature |
 | Log Interval | s | 10 – 3600 | 60 | Period between telemetry log entries |
 | Vth Measurement Interval | min | 5 – 1440 | 60 | Period between Vth measurements |
-| Data Directory | — | — | `data/GSS` | Destination directory for per-controller CSV files (local or NAS) |
-| NAS Directory | — | — | *(empty)* | Optional second destination, typically a NAS mount point — see [Data Storage](#gss-data-storage) |
+| NAS Backup Directory | — | — | *(empty)* | Optional destination that mirrors the Results file, typically a NAS mount point — see [Data Storage](#gss-data-storage) |
 
 #### Data Output (per log entry, per DUT)
 
@@ -524,15 +534,14 @@ Below the file field, a directory chooser sets the folder for output files. The 
 
 **Plot:** Timestamp vs. Vth (V).
 
-In addition to the pymeasure results table, each controller also writes its own CSV file with the naming pattern `GSS_<id>_<YYYY-MM-DD_HH-MM-SS>.csv`.
+GSS manages exactly one controller per queued run; to stress several controllers at once, queue one GSS experiment per controller.
 
 #### Data Storage {#gss-data-storage}
 
-Because a GSS run can last days or weeks, and CSV rows are flushed after every log entry, the storage path matters:
+Because a GSS run can last days or weeks, there is exactly one CSV file for the whole run — pymeasure's own Results file (same one shown in the browser/plot), saved directly to the **Local Directory** field in the toolbar. There is no separate local cache or per-controller file.
 
-- **Local cache** — all CSV files are always written first to a temporary directory on the local machine (`/tmp/gss_cache_<random>/` on Linux, `%TEMP%\gss_cache_<random>\` on Windows).  Writes to the local filesystem are fast and never block the stress test, even if the network is unavailable.
-- **Data Directory** — at the end of the run (and every hour during the run) the local cache files are copied to **Data Directory**.  This is the primary output and can be a local path or an already-mounted NAS share.
-- **NAS Directory** — if set, the same files are also copied to this second location every hour and on run completion.  Leave empty if no separate NAS backup is needed.
+- **Local Directory** (toolbar) — where the Results file (and a `.checkpoint.json` used to resume after a crash/restart) is written directly. This is the single authoritative local copy.
+- **NAS Backup Directory** (GSS parameter) — if set, the Results file and checkpoint are also copied here every hour and on run completion, mirroring the Local Directory exactly.
 
 The hourly sync runs in a background thread.  If the NAS is unreachable the warning is logged and the test continues unaffected — the next sync attempt occurs one hour later.  No data is lost as long as the local machine stays up.
 
@@ -563,51 +572,23 @@ The hourly sync runs in a background thread.  If the NAS is unreachable the warn
    - If using temperature control, set **Temperature** and the correct **TCU Channel**.
    - Choose the **Vth Method**: `force_current` forces a constant current and measures gate voltage (standard); `ramp_voltage` sweeps gate voltage and detects the current threshold.
    - Adjust **Log Interval** and **Vth Measurement Interval** as needed.
-   - Set the **Data Directory** (local path or mounted share path).
-   - Optionally set **NAS Directory** to a second destination (e.g. `/mnt/nas/GSS`) for an additional hourly backup copy.
+   - Optionally set **NAS Backup Directory** to a second destination (e.g. `/mnt/nas/GSS`) for an additional hourly backup copy of the Results file.
+   - To stress several controllers at once, queue one GSS experiment per controller (each with its own **Local Directory**/filename) rather than configuring several controllers in a single run.
 
-4. **Multi-controller advanced mode (optional):**
-   - To run several GSS controllers simultaneously with individual configurations, populate the **Controller Configuration (JSON)** field with a JSON array (see below).
-   - When this field is non-empty it takes precedence over the individual parameter fields.
-
-   ```json
-   [
-     {
-       "id": "Ctrl1", "port": "COM5",
-       "freq_hz": 100000, "duty_cycle": 0.5,
-       "v_gate_on": 15.0, "v_gate_off": -5.0, "num_duts": 4,
-       "psu_resource": "ASRL8::INSTR", "psu_ch_pos": 1, "psu_ch_neg": 2,
-       "tcu_port": "COM7", "tcu_channel": 1, "temperature_c": 150.0,
-       "smu_channel": "a"
-     },
-     {
-       "id": "Ctrl2", "port": "COM6",
-       "freq_hz": 200000, "duty_cycle": 0.4,
-       "v_gate_on": 18.0, "v_gate_off": -3.0, "num_duts": 2,
-       "psu_resource": "ASRL8::INSTR", "psu_ch_pos": 1, "psu_ch_neg": 2,
-       "tcu_port": "COM7", "tcu_channel": 2, "temperature_c": 125.0,
-       "smu_channel": "b"
-     }
-   ]
-   ```
-
-   Both controllers above share one PSU and one TCU (different channels). The software opens only one VISA/serial connection per unique resource string.
-
-5. **Start the stress test:**
+4. **Start the stress test:**
    - Enter a filename and verify the output directory.
    - Click **Start**.
    - The software connects to all instruments, configures the PSU rails, sets the temperature (if TCU enabled), and starts each GSS controller in a dedicated background thread.
    - Telemetry (cycles, temperature, PSU voltage) is logged every **Log Interval** seconds.
    - Vth is measured for every DUT every **Vth Measurement Interval** minutes, one DUT at a time, with the SMU protected by a mutex.
 
-6. **Monitoring a long-duration test:**
+5. **Monitoring a long-duration test:**
    - The live plot shows Vth vs. time for all DUTs.
-   - The results table shows one row per log entry per DUT.
-   - Per-controller CSV files accumulate in the **Data Directory** (and **NAS Directory** if configured), synced every hour.
-   - The local cache location is logged at startup (search the log for `GSS local cache:`).
+   - The results table shows one row per log entry per DUT; this is the same data written to the Results file in the **Local Directory**.
+   - If **NAS Backup Directory** is configured, the Results file and checkpoint are mirrored there every hour.
    - The Status column in the table shows the worker state (`running`, `stopped`, `startup error`, etc.).
 
-7. **Stop / Abort:**
+6. **Stop / Abort:**
    - Click **Abort** to request a graceful stop.
    - All worker threads stop within the **Worker Shutdown Timeout** seconds.
    - PSU outputs and TCU channels are disabled.
@@ -828,7 +809,7 @@ Every measurement run writes a CSV file with:
 
 #### Directory per Procedure
 
-Each procedure has its own output directory, configurable via the **Data Directory** field in the main window. The selected directory is persisted in `settings.toml` under `[directories]`.
+Each procedure has its own output directory, configurable via the **Local Directory** field in the main window. The selected directory is persisted in `settings.toml` under `[directories]`.
 
 Default directories from `settings.toml`:
 
@@ -839,15 +820,9 @@ Default directories from `settings.toml`:
 | High Power Pulse Test | `./data` |
 | Gate Switching Stress | `./data/GSS` |
 
-### 10.2 GSS Per-Controller CSV
+### 10.2 GSS NAS Backup
 
-In addition to the pymeasure results file, the GSS procedure writes one CSV file per GSS controller directly to the **Data Directory**:
-
-```
-GSS_<controller_id>_<YYYY-MM-DD_HH-MM-SS>.csv
-```
-
-These files contain the same columns as `DATA_COLUMNS`, written with Python's `csv.writer`.
+GSS has one extra parameter, **NAS Backup Directory**. When set, the procedure periodically (hourly, and on completion) copies its Results file — the same CSV described above — and its checkpoint file to this directory, so the exact same data exists in both the Local Directory and the NAS Backup Directory. There is no separate per-controller file; GSS manages exactly one controller per queued run.
 
 ### 10.3 Loading Previous Results
 
