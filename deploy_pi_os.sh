@@ -67,7 +67,7 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 
 # ---------------------------------------------------------------------------
-# 7. Smoke-test key imports
+# 7. Smoke-test key imports. If any fail, check if system packages are accessible in the virtual environment.
 # ---------------------------------------------------------------------------
 echo 'Verifying key packages...'
 python -c 'import PyQt5; import pyqtgraph; import pymeasure; import pyvisa'

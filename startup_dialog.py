@@ -902,8 +902,8 @@ class GSSHardwareScanWidget(QGroupBox):
     _ROWS = [
         ('gss',      'GSS Controllers'),
         ('tcu',      'TCU Units'),
-        ('nge103',   'R\u00e9S NGE103B PSU'),
-        ('hmc8043',  'R\u00e9S HMC8043 PSU'),
+        ('nge103',   'R&S NGE103B PSU'),
+        ('hmc8043',  'R&S HMC8043 PSU'),
         ('keithley', 'Keithley SMU'),
     ]
 
