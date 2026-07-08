@@ -10,8 +10,9 @@ To discover available VISA resources run:
 
 import sys
 import logging
+from pathlib import Path
 
-sys.path.insert(0, r'e:\Projekte\Ziemann Engineering\Projekte\HPPT2\Python Software')
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from hardware.keithley_2636 import KeyithleySMU
 

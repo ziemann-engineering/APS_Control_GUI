@@ -344,24 +344,54 @@ class KeyithleySMU:
     ) -> Optional[float]:
         """Find Vth by sweeping voltage and detecting when current crosses threshold.
 
-        The DUT must be connected (gate-drain tied, source grounded).  The
-        voltage is stepped from *start_voltage_v* to *stop_voltage_v* in steps
-        of *step_voltage_v*.  The first voltage at which |I| ≥
-        *threshold_current_a* is returned as Vth.  Returns *stop_voltage_v* if
-        the threshold is never reached, or *None* on error.
+        The voltage is stepped from *start_voltage_v* to *stop_voltage_v* in
+        increments of *step_voltage_v*.  The first voltage at which
+        |I| >= *threshold_current_a* is returned as Vth.  Returns
+        *stop_voltage_v* if the threshold is never reached, or *None* on error.
+
+        2636B / 2604B (TSP, dual-channel)
+        ---------------------------------
+        Both SMU channels are used simultaneously following the JEP183A
+        gate-connected (diode) configuration:
+
+        * *channel* selects the **gate** channel ('a' or 'b').  The remaining
+          channel is automatically assigned as the **drain**.
+        * Gate voltage = drain voltage at every step (gate tied to drain).
+        * Source is assumed to be grounded externally.
+
+        2450 / 2400-series (SCPI, single-channel)
+        ------------------------------------------
+        Only one SMU channel exists.  *channel* is ignored.  The single
+        output acts as the combined gate/drain drive; the DUT must be wired
+        in diode configuration (gate shorted to drain, source grounded) before
+        calling this method.
 
         Parameters
         ----------
         channel:
-            SMU channel ('a' or 'b' for 2636B/2604B; ignored for single-ch).
+            For 2636B/2604B: selects which SMU channel drives the **gate**
+            ('a' or 'b'); the other channel drives the drain automatically.
+            For 2450/2400-series: ignored.
+        precondition_voltage_v:
+            Voltage applied to the gate before the sweep to pre-stress the
+            oxide (V).  Set to 0.0 to skip the precondition step.
+        precondition_duration_s:
+            How long the precondition voltage is held (s).
+        break_time_s:
+            Dead time between end of precondition and start of sweep (s).
+            Only used by the TSP path; the SCPI path relies on
+            apply_precondition_voltage() which turns off the output first.
         start_voltage_v:
-            Starting voltage for the sweep (V).
+            First voltage in the sweep (V).
         stop_voltage_v:
-            Upper voltage limit / compliance (V).
+            Last voltage in the sweep / compliance limit (V).  May be less
+            than *start_voltage_v* for a descending sweep.
         step_voltage_v:
-            Voltage step size (V).  Must be > 0.
+            Magnitude of each voltage step (V).  Sign is adjusted
+            automatically to match the sweep direction.
         threshold_current_a:
-            Current at which the device is considered to have turned on (A).
+            Drain (or output) current magnitude at which the device is
+            considered ON and Vth is recorded (A).
         """
         if self._instr is None:
             log.error('SMU not connected')
@@ -401,7 +431,11 @@ class KeyithleySMU:
         break_s: float,
         start_v: float, stop_v: float, step_v: float, threshold_i: float,
     ) -> Optional[float]:
-        """JEP183A-style Vth ramp via Lua/TSP using gate and drain channels."""
+        """JEP183A-style Vth ramp via Lua/TSP using both SMU channels.
+
+        *channel* is the gate channel; the complementary channel ('a'↔'b')
+        is used as the drain.  Gate and drain voltages are stepped together.
+        """
         gate_channel = channel if channel in ('a', 'b') else 'a'
         drain_channel = 'b' if gate_channel == 'a' else 'a'
         gate = f'smu{gate_channel}'
