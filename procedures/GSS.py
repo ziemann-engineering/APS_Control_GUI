@@ -1200,7 +1200,7 @@ class GateStressTest(Procedure):
             if not configured_channels and hasattr(psu, 'num_channels'):
                 try:
                     configured_channels = list(range(1, int(psu.num_channels) + 1))
-                except Exception:
+                except (TypeError, ValueError):
                     pass
             try:
                 with psu_lock:

@@ -459,6 +459,9 @@ class GSSController:
         deadline = time.time() + batch_duration_s + extra_timeout_s
         batch_start = time.time()
         poll_interval_s = max(0.1, poll_interval_s)
+        # Guard against false "idle" status parses where the controller has not
+        # yet published a parseable cycle count; after a few consecutive misses,
+        # report None so caller retry logic can recover.
         idle_polls_without_count = 0
         while time.time() < deadline:
             if should_stop is not None and should_stop():
