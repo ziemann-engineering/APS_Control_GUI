@@ -24,19 +24,19 @@ logging.basicConfig(
 # ---------------------------------------------------------------------------
 # Configuration — adjust before running
 # ---------------------------------------------------------------------------
-VISA_RESOURCE = 'USB0::0x05E6::0x2636::XXXXXXXX::INSTR'   # ← your VISA address
+VISA_RESOURCE = 'USB0::0x05E6::0x2636::4440816::INSTR'   # ← your VISA address
 CHANNEL = 'a'               # 'a' or 'b' for 2636B; ignored for 2450/2410
 
 # Force-current method (vth_method = 'force_current')
-FORCE_CURRENT_A = 1e-3      # vth_current_ma = 1.0 → 1 mA
+FORCE_CURRENT_A = 2.8e-3      # vth_current_ma = 1.0 → 1 mA
 COMPLIANCE_V    = 10.0      # vth_compliance_voltage
 
 # Ramp-voltage method (vth_method = 'ramp_voltage')
-PRECOND_V       = 0.0       # vth_precond_voltage  (0.0 = skip)
+PRECOND_V       = 20       # vth_precond_voltage  (0.0 = skip)
 START_V         = 6.0       # vth_ramp_start_voltage
 STOP_V          = 0.0       # vth_ramp_stop_voltage
-STEP_V          = 0.05      # vth_ramp_step_voltage
-THRESHOLD_I_A   = 1e-6      # vth_threshold_current
+STEP_V          = 0.005      # vth_ramp_step_voltage
+THRESHOLD_I_A   = 2.8e-3      # vth_threshold_current
 # ---------------------------------------------------------------------------
 
 

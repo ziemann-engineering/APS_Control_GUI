@@ -440,7 +440,7 @@ class KeyithleySMU:
         drain_channel = 'b' if gate_channel == 'a' else 'a'
         gate = f'smu{gate_channel}'
         drain = f'smu{drain_channel}'
-        source_limit_i = max(abs(threshold_i) * 100.0, 1e-3)
+        source_limit_i = max(abs(threshold_i) * 100.0, 10e-3)
         script = (
             f'{gate}.reset() {drain}.reset() '
             f'{gate}.source.func = {gate}.OUTPUT_DCVOLTS '
