@@ -1,5 +1,5 @@
 """
-Standalone test for KeyithleySMU Vth measurement.
+Standalone test for KeithleySMU Vth measurement.
 
 Adjust VISA_RESOURCE and the measurement parameters below, then run:
     python tests/test_5_smu_vth.py
@@ -14,7 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from hardware.keithley_2636 import KeyithleySMU
+from hardware.keithley_2636 import KeithleySMU
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -41,7 +41,7 @@ THRESHOLD_I_A   = 2.8e-3      # vth_threshold_current
 
 
 def main():
-    smu = KeyithleySMU(VISA_RESOURCE)
+    smu = KeithleySMU(VISA_RESOURCE)
 
     if not smu.connect():
         print('ERROR: Could not connect to SMU. Check VISA_RESOURCE above.')

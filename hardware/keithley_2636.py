@@ -15,7 +15,7 @@ procedure does this via its smu_lock.
 
 Usage
 -----
-    smu = KeyithleySMU('GPIB::26')
+    smu = KeithleySMU('GPIB::26')
     smu.connect()
     vth = smu.measure_vth(channel='a', force_current_a=250e-6,
                           compliance_voltage_v=10.0)
@@ -35,7 +35,7 @@ class SMUError(Exception):
     """Exception for SMU errors."""
 
 
-class KeyithleySMU:
+class KeithleySMU:
     """Unified interface for Keithley 2636B and 2450/2400-series SMUs.
 
     Model detection
@@ -167,16 +167,16 @@ class KeyithleySMU:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _detect_family(idn: str) -> Optional[str]:
+    @classmethod
+    def _detect_family(cls, idn: str) -> Optional[str]:
         """Return the instrument family string from its IDN response."""
         idn_upper = idn.upper()
         if '2636' in idn_upper or '2604' in idn_upper or '2602' in idn_upper:
-            return KeyithleySMU._FAMILY_TSP
+            return cls._FAMILY_TSP
         if '2450' in idn_upper:
-            return KeyithleySMU._FAMILY_2450
+            return cls._FAMILY_2450
         if '2400' in idn_upper or '2410' in idn_upper or '2420' in idn_upper:
-            return KeyithleySMU._FAMILY_2400
+            return cls._FAMILY_2400
         return None
 
     def _write(self, cmd: str):
@@ -518,4 +518,3 @@ class KeyithleySMU:
 
         self._write(':OUTP OFF')
         return vth
-
