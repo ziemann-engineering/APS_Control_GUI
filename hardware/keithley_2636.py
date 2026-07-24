@@ -441,54 +441,58 @@ class KeithleySMU:
         gate = f'smu{gate_channel}'
         drain = f'smu{drain_channel}'
         source_limit_i = max(abs(threshold_i) * 100.0, 10e-3)
-        script = '\n'.join((
-            'function vth_ramp()',
-            f'  {gate}.reset()',
-            f'  {drain}.reset()',
-            f'  {gate}.source.func = {gate}.OUTPUT_DCVOLTS',
-            f'  {drain}.source.func = {drain}.OUTPUT_DCVOLTS',
-            f'  {gate}.source.limiti = {source_limit_i:.6e}',
-            f'  {drain}.source.limiti = {source_limit_i:.6e}',
-            f'  {drain}.measure.autorangei = {drain}.AUTORANGE_ON',
-            f'  {gate}.source.levelv = {precondition_v:.4f}',
-            f'  {drain}.source.levelv = 0',
-            f'  {gate}.source.output = {gate}.OUTPUT_ON',
-            f'  {drain}.source.output = {drain}.OUTPUT_ON',
-            f'  delay({precondition_s:.6f})',
-            f'  {gate}.source.levelv = 0',
-            f'  delay({break_s:.6f})',
-            f'  local vth = {stop_v:.4f}',
-            f'  local v = {start_v:.4f}',
-            f'  local step = {step_v:.4f}',
-            f'  while ((step > 0 and v <= {stop_v:.4f}) or (step < 0 and v >= {stop_v:.4f})) do',
-            f'    {gate}.source.levelv = v',
-            f'    {drain}.source.levelv = v',
-            '    delay(0.002)',
-            f'    local i = {drain}.measure.i()',
-            f'    if ((step > 0 and math.abs(i) >= {threshold_i:.6e}) or',
-            f'        (step < 0 and math.abs(i) <= {threshold_i:.6e})) then',
-            '      vth = v',
-            '      break',
-            '    end',
-            '    v = v + step',
-            '  end',
-            f'  {gate}.source.output = {gate}.OUTPUT_OFF',
-            f'  {drain}.source.output = {drain}.OUTPUT_OFF',
-            f'  {gate}.reset()',
-            f'  {drain}.reset()',
-            '  print(vth)',
-            'end',
-        ))
-        self._write('loadscript vth_ramp')
-        for line in script.splitlines():
-            self._write(line)
-        self._write('endscript')
-        raw = self._query('vth_ramp()')
         try:
-            return float(raw)
-        except ValueError:
-            log.error(f'SMU TSP ramp: unexpected response: {raw!r}')
-            return None
+            # Do not upload a multiline TSP script here.  Some VISA backends
+            # used on Raspberry Pi do not preserve the script-upload command
+            # boundaries, which leaves the SMU idle and makes the final query
+            # time out.  Each command below is a complete one-line TSP command.
+            self._write(f'{gate}.reset()')
+            self._write(f'{drain}.reset()')
+            self._write(f'{gate}.source.func = {gate}.OUTPUT_DCVOLTS')
+            self._write(f'{drain}.source.func = {drain}.OUTPUT_DCVOLTS')
+            self._write(f'{gate}.source.limiti = {source_limit_i:.6e}')
+            self._write(f'{drain}.source.limiti = {source_limit_i:.6e}')
+            self._write(f'{drain}.measure.autorangei = {drain}.AUTORANGE_ON')
+            self._write(f'{gate}.source.levelv = {precondition_v:.4f}')
+            self._write(f'{drain}.source.levelv = 0')
+            self._write(f'{gate}.source.output = {gate}.OUTPUT_ON')
+            self._write(f'{drain}.source.output = {drain}.OUTPUT_ON')
+            time.sleep(precondition_s)
+            self._write(f'{gate}.source.levelv = 0')
+            time.sleep(break_s)
+
+            vth = stop_v
+            v = start_v
+            while ((step_v > 0 and v <= stop_v)
+                   or (step_v < 0 and v >= stop_v)):
+                self._write(f'{gate}.source.levelv = {v:.4f}')
+                self._write(f'{drain}.source.levelv = {v:.4f}')
+                time.sleep(0.002)
+                raw = self._query(f'print({drain}.measure.i())')
+                try:
+                    current = float(raw)
+                except ValueError:
+                    log.error(f'SMU TSP ramp: unexpected current response: {raw!r}')
+                    return None
+
+                crossed = (
+                    (step_v > 0 and abs(current) >= threshold_i)
+                    or (step_v < 0 and abs(current) <= threshold_i)
+                )
+                if crossed:
+                    vth = v
+                    break
+                v += step_v
+
+            return vth
+        finally:
+            try:
+                self._write(f'{gate}.source.output = {gate}.OUTPUT_OFF')
+                self._write(f'{drain}.source.output = {drain}.OUTPUT_OFF')
+                self._write(f'{gate}.reset()')
+                self._write(f'{drain}.reset()')
+            except Exception as exc:
+                log.warning(f'SMU TSP ramp cleanup error: {exc}')
 
     def _ramp_vth_scpi(
         self,
