@@ -1007,6 +1007,13 @@ class GateStressTest(Procedure):
         """Parse configuration, connect all shared hardware."""
         self._workers: List[GSSWorker] = []
         self._result_queue: queue.Queue = queue.Queue()
+        # Initialise pools early so shutdown() is always safe even if startup
+        # raises an exception before reaching the sections that populate them.
+        self._configs: List['ControllerConfig'] = []
+        self._psu_pool: Dict[str, Any] = {}
+        self._psu_locks: Dict[str, threading.Lock] = {}
+        self._tcu_pool: Dict[str, Any] = {}
+        self._smu = None
 
         # The GUI (APS GUI.py) computes the exact path of pymeasure's own
         # Results CSV before queuing this procedure and stores it here, so

@@ -1037,7 +1037,7 @@ class GSSHardwareScanWidget(QGroupBox):
             # find_firmware_update() only returns a path when a .bin on disk
             # has a build date strictly newer than current_build_date, so no
             # further date comparison is needed here.
-            fw_path, fw_date = GSSController.find_firmware_update(current_build_date, FIRMWARE_DIR)
+            fw_path, fw_date = GSSController.find_firmware_update(current_build_date, FIRMWARE_DIR) or (None, None)
             log.info(
                 f"GSS SN:{dev.get('serial')} firmware date check — "
                 f"device (from *IDN?): {current_build_date}, "
