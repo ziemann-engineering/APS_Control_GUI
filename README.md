@@ -688,7 +688,7 @@ Same shell-prompt protocol as the APS board: commands terminated with CR+LF, res
 
 **File:** `hardware/keithley_2636.py`
 
-The `KeyithleySMU` class provides a unified interface for Keithley SMUs. The instrument model is auto-detected from the `*IDN?` response.
+The `KeithleySMU` class provides a unified interface for Keithley SMUs. The instrument model is auto-detected from the `*IDN?` response.
 
 #### Supported Models
 

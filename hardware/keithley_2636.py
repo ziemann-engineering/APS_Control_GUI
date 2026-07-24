@@ -15,7 +15,7 @@ procedure does this via its smu_lock.
 
 Usage
 -----
-    smu = KeyithleySMU('GPIB::26')
+    smu = KeithleySMU('GPIB::26')
     smu.connect()
     vth = smu.measure_vth(channel='a', force_current_a=250e-6,
                           compliance_voltage_v=10.0)
@@ -35,7 +35,7 @@ class SMUError(Exception):
     """Exception for SMU errors."""
 
 
-class KeyithleySMU:
+class KeithleySMU:
     """Unified interface for Keithley 2636B and 2450/2400-series SMUs.
 
     Model detection

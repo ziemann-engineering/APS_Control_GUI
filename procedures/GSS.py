@@ -1073,8 +1073,8 @@ class GateStressTest(Procedure):
         _smu_info = _DEVICE_REGISTRY.get(self.smu_serial, {})
         _smu_resource = _smu_info.get('resource', self.smu_serial)
         if _smu_resource:
-            from hardware.keithley_2636 import KeyithleySMU
-            smu = KeyithleySMU(_smu_resource)
+            from hardware.keithley_2636 import KeithleySMU
+            smu = KeithleySMU(_smu_resource)
             if smu.connect():
                 self._smu = smu
                 log.info(f'SMU connected: {smu.idn}')
