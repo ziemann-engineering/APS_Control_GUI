@@ -615,15 +615,18 @@ class GSSController:
         response = self._send_command('measure_supply')
         if response is None:
             return (None, None)
-        # Firmware can prefix a negative ADC result with '+' (e.g. "+-0.34").
-        # Match that literal form, then normalize it so both fields use float().
+        # Matches unsigned, conventional signed, and firmware's "+-" values
+        # (e.g. "0.00", "+0.00", "-0.34", "+-0.34", or ".5").
         voltage_value_pattern = r'(?:\+-|[+-])?(?:\d+(?:\.\d*)?|\.\d+)'
         m = re.search(
             rf'POS:({voltage_value_pattern})\s+NEG:({voltage_value_pattern})',
             response,
         )
         if m:
-            return tuple(float(value.replace('+-', '-')) for value in m.groups())
+            return tuple(
+                float(value.replace('+-', '-'))  # Normalize the firmware's "+-" sign.
+                for value in m.groups()
+            )
         return (None, None)
 
     def select_dut(self, dut_index: int) -> bool:
