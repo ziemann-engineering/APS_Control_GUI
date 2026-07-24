@@ -1197,9 +1197,9 @@ class GateStressTest(Procedure):
                 if cfg.psu_resource == resource
                 for ch in (cfg.psu_ch_pos, cfg.psu_ch_neg)
             })
-            if hasattr(psu, 'num_channels'):
+            if not configured_channels and hasattr(psu, 'num_channels'):
                 try:
-                    configured_channels = sorted(set(configured_channels) | set(range(1, int(psu.num_channels) + 1)))
+                    configured_channels = list(range(1, int(psu.num_channels) + 1))
                 except Exception:
                     pass
             try:

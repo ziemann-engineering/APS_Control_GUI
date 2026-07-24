@@ -379,10 +379,12 @@ class GSSController:
         if status is None:
             raise GSSCommunicationError('No response to status command')
         s = status.lower()
-        if any(token in s for token in ('not running', 'idle', 'stopped', 'complete', 'ready')):
+        if 'not running' in s:
             return False
         if any(token in s for token in ('running', 'in progress', 'active', 'busy')):
             return True
+        if any(token in s for token in ('idle', 'stopped', 'complete', 'ready')):
+            return False
         return 'test running' in s and 'gss' in s
 
     def run_batch(self, cycles: int, freq_hz: float, duty_cycle: float,
@@ -451,12 +453,13 @@ class GSSController:
             try:
                 if not self.is_running():
                     return self._extract_cycle_count(response)
-            except Exception:
+            except GSSCommunicationError:
                 return self._extract_cycle_count(response)
 
         deadline = time.time() + batch_duration_s + extra_timeout_s
         batch_start = time.time()
         poll_interval_s = max(0.1, poll_interval_s)
+        idle_polls_without_count = 0
         while time.time() < deadline:
             if should_stop is not None and should_stop():
                 self.stop()
@@ -471,6 +474,12 @@ class GSSController:
                 count = self.get_cycle_count()
                 if count is not None:
                     return count
+                idle_polls_without_count += 1
+                if idle_polls_without_count >= 3:
+                    return None
+                time.sleep(poll_interval_s)
+                continue
+            idle_polls_without_count = 0
 
             if on_progress is not None:
                 elapsed_s = time.time() - batch_start
