@@ -454,10 +454,12 @@ class GSSController:
             return completed
 
         if not self._response_indicates_start_ack(response):
+            running = False
             try:
-                if not self.is_running():
-                    return self._extract_cycle_count(response)
+                running = self.is_running()
             except GSSCommunicationError:
+                running = False
+            if not running:
                 return self._extract_cycle_count(response)
 
         deadline = time.time() + batch_duration_s + extra_timeout_s

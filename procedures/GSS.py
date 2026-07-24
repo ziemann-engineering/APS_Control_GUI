@@ -1221,6 +1221,11 @@ class GateStressTest(Procedure):
                             psu.emergency_stop()
                         except Exception as exc:
                             log.warning(f'PSU {resource} emergency stop failed: {exc}')
+                    if not configured_channels:
+                        log.warning(
+                            f'PSU {resource}: no target channels available for explicit '
+                            'disable; proceeding with disconnect only'
+                        )
                     for ch in configured_channels:
                         try:
                             psu.enable_output(ch, False)
