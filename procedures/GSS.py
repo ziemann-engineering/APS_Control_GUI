@@ -1200,6 +1200,10 @@ class GateStressTest(Procedure):
             if not configured_channels and hasattr(psu, 'num_channels'):
                 try:
                     configured_channels = list(range(1, int(psu.num_channels) + 1))
+                    log.warning(
+                        f'PSU {resource}: no configured channel map found; '
+                        f'falling back to disabling all {len(configured_channels)} channel(s)'
+                    )
                 except (TypeError, ValueError):
                     pass
             try:
@@ -1207,13 +1211,13 @@ class GateStressTest(Procedure):
                     if hasattr(psu, 'enable_master_output'):
                         try:
                             psu.enable_master_output(False)
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            log.warning(f'PSU {resource} master output disable failed: {exc}')
                     if hasattr(psu, 'emergency_stop'):
                         try:
                             psu.emergency_stop()
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            log.warning(f'PSU {resource} emergency stop failed: {exc}')
                     for ch in configured_channels:
                         try:
                             psu.enable_output(ch, False)

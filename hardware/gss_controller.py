@@ -127,6 +127,7 @@ class GSSController:
     Methods that send firmware-specific commands are stubs that raise
     NotImplementedError until the firmware protocol is finalised.
     """
+    _MAX_IDLE_POLLS_WITHOUT_COUNT = 3
 
     # -----------------------------------------------------------------------
     # Construction & connection
@@ -478,7 +479,7 @@ class GSSController:
                 if count is not None:
                     return count
                 idle_polls_without_count += 1
-                if idle_polls_without_count >= 3:
+                if idle_polls_without_count >= self._MAX_IDLE_POLLS_WITHOUT_COUNT:
                     return None
                 time.sleep(poll_interval_s)
                 continue
