@@ -132,6 +132,8 @@ class GSSController:
     _MAX_IDLE_POLLS_WITHOUT_COUNT = 3
     _CYCLE_COUNT_PATTERNS = (
         re.compile(r'TEST_COMPLETE\s*[:=]?\s*(\d+)', re.IGNORECASE),
+        # Cycle reports occupy an entire response line; anchoring avoids
+        # mistaking "GSS starting: cycles=<requested>" for completion.
         re.compile(r'^\s*GSS_CYCLES\b\s*[:=]?\s*(\d+)\b', re.IGNORECASE | re.MULTILINE),
         re.compile(r'^\s*CYCLES?\b\s*[:=]?\s*(\d+)\b', re.IGNORECASE | re.MULTILINE),
         re.compile(r'\bTOTAL[_\s-]*CYCLES?\b\s*[:=]?\s*(\d+)', re.IGNORECASE),
@@ -613,13 +615,13 @@ class GSSController:
         response = self._send_command('measure_supply')
         if response is None:
             return (None, None)
+        # Firmware can prefix a negative POS ADC result with '+' (e.g. "+-0.34").
         voltage_value_pattern = r'(?:\+-|[+-])?(?:\d+(?:\.\d*)?|\.\d+)'
         m = re.search(
             rf'POS:({voltage_value_pattern})\s+NEG:({voltage_value_pattern})',
             response,
         )
         if m:
-            # Firmware can prefix a negative POS ADC result with '+' (e.g. "+-0.34").
             return tuple(float(value.replace('+-', '-')) for value in m.groups())
         return (None, None)
 
