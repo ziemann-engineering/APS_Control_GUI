@@ -423,7 +423,94 @@ class KeithleySMU:
             log.error(f'SMU measure_vth_ramp error: {exc}')
             return None
 
+    def _is_pyvisa_py_backend(self) -> bool:
+        """Return whether this resource manager is using the pyvisa-py backend."""
+        if self._rm is None:
+            return False
+        visalib = self._rm.visalib
+        return (
+            visalib.__class__.__module__.startswith('pyvisa_py.')
+            or 'pyvisa-py' in str(getattr(visalib, 'library_path', '')).lower()
+        )
+
     def _ramp_vth_tsp(
+        self,
+        channel: str,
+        precondition_v: float,
+        precondition_s: float,
+        break_s: float,
+        start_v: float, stop_v: float, step_v: float, threshold_i: float,
+    ) -> Optional[float]:
+        """Run the TSP ramp using the best implementation for the VISA backend."""
+        if self._is_pyvisa_py_backend():
+            log.info('SMU TSP ramp: using pyvisa-py line-by-line fallback')
+            return self._ramp_vth_tsp_direct(
+                channel, precondition_v, precondition_s, break_s,
+                start_v, stop_v, step_v, threshold_i,
+            )
+
+        log.info('SMU TSP ramp: using NI-VISA on-instrument script')
+        return self._ramp_vth_tsp_script(
+            channel, precondition_v, precondition_s, break_s,
+            start_v, stop_v, step_v, threshold_i,
+        )
+
+    def _ramp_vth_tsp_script(
+        self,
+        channel: str,
+        precondition_v: float,
+        precondition_s: float,
+        break_s: float,
+        start_v: float, stop_v: float, step_v: float, threshold_i: float,
+    ) -> Optional[float]:
+        """Fast on-instrument TSP implementation used with NI-VISA."""
+        gate_channel = channel if channel in ('a', 'b') else 'a'
+        drain_channel = 'b' if gate_channel == 'a' else 'a'
+        gate = f'smu{gate_channel}'
+        drain = f'smu{drain_channel}'
+        source_limit_i = max(abs(threshold_i) * 100.0, 10e-3)
+        script = (
+            f'{gate}.reset() {drain}.reset() '
+            f'{gate}.source.func = {gate}.OUTPUT_DCVOLTS '
+            f'{drain}.source.func = {drain}.OUTPUT_DCVOLTS '
+            f'{gate}.source.limiti = {source_limit_i:.6e} '
+            f'{drain}.source.limiti = {source_limit_i:.6e} '
+            f'{drain}.measure.autorangei = {drain}.AUTORANGE_ON '
+            f'{gate}.source.levelv = {precondition_v:.4f} '
+            f'{drain}.source.levelv = 0 '
+            f'{gate}.source.output = {gate}.OUTPUT_ON '
+            f'{drain}.source.output = {drain}.OUTPUT_ON '
+            f'delay({precondition_s:.6f}) '
+            f'{gate}.source.levelv = 0 '
+            f'delay({break_s:.6f}) '
+            f'local vth = {stop_v:.4f} '
+            f'local v = {start_v:.4f} '
+            f'local step = {step_v:.4f} '
+            f'while ((step > 0 and v <= {stop_v:.4f}) or (step < 0 and v >= {stop_v:.4f})) do '
+            f'  {gate}.source.levelv = v '
+            f'  {drain}.source.levelv = v '
+            f'  delay(0.002) '
+            f'  local i = {drain}.measure.i() '
+            f'  if ((step > 0 and math.abs(i) >= {threshold_i:.6e}) or '
+            f'      (step < 0 and math.abs(i) <= {threshold_i:.6e})) then '
+            f'    vth = v '
+            f'    break '
+            f'  end '
+            f'  v = v + step '
+            f'end '
+            f'{gate}.source.output = {gate}.OUTPUT_OFF '
+            f'{drain}.source.output = {drain}.OUTPUT_OFF '
+            f'{gate}.reset() {drain}.reset() '
+            f'print(vth)'
+        )
+        raw = self._query(f'do {script} end')
+        try:
+            return float(raw)
+        except ValueError:
+            log.error(f'SMU TSP ramp: unexpected response: {raw!r}')
+            return None
+
+    def _ramp_vth_tsp_direct(
         self,
         channel: str,
         precondition_v: float,

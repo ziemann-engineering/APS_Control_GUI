@@ -10,9 +10,13 @@ Usage:
     python test_rs_hmc8043.py
 """
 
+import logging
 import pyvisa
 import time
 from typing import Optional, List, Dict
+
+
+log = logging.getLogger(__name__)
 
 
 class RSHMC8043Controller:
@@ -61,6 +65,26 @@ class RSHMC8043Controller:
         self.psu.write('*RST')
         self.psu.write('*CLS')
         time.sleep(1)  # Allow time for reset
+
+    def select_channel(self, channel: int):
+        """Select and verify the active HMC8043 output channel."""
+        if not self.psu:
+            raise RuntimeError("Not connected to power supply")
+        if not (1 <= channel <= self.num_channels):
+            raise ValueError(f"Channel must be between 1 and {self.num_channels}")
+
+        self.psu.write(f'INSTrument:NSELect {channel}')
+        selected = int(float(self.psu.query('INSTrument:NSELect?').strip()))
+        if selected != channel:
+            raise RuntimeError(
+                f'HMC8043 channel selection failed: requested CH{channel}, '
+                f'instrument reports CH{selected}'
+            )
+
+    def _wait_for_operation(self):
+        """Wait until the HMC8043 has executed the preceding setting command."""
+        if self.psu.query('*OPC?').strip() != '1':
+            raise RuntimeError('HMC8043 did not acknowledge operation completion')
     
     def enable_output(self, channel: int, enabled: bool = True):
         """
@@ -78,8 +102,9 @@ class RSHMC8043Controller:
         
         state = "ON" if enabled else "OFF"
         print(f"Channel {channel} output: {state}")
-        self.psu.write(f'INSTrument:NSELect {channel}')
+        self.select_channel(channel)
         self.psu.write(f'OUTPut:STATe {state}')
+        self._wait_for_operation()
     
     def set_voltage(self, channel: int, voltage: float):
         """
@@ -96,7 +121,15 @@ class RSHMC8043Controller:
             raise ValueError(f"Channel must be between 1 and {self.num_channels}")
         
         print(f"Setting Channel {channel} voltage to {voltage} V")
-        self.psu.write(f'SOURce{channel}:VOLTage {voltage}')
+        self.select_channel(channel)
+        self.psu.write(f'VOLTage {voltage:.6f}')
+        self._wait_for_operation()
+        actual = float(self.psu.query('VOLTage?').strip())
+        if abs(actual - voltage) > 0.01:
+            raise RuntimeError(
+                f'HMC8043 CH{channel} voltage verification failed: '
+                f'requested {voltage:.3f} V, read {actual:.3f} V'
+            )
     
     def set_current(self, channel: int, current: float):
         """
@@ -113,7 +146,9 @@ class RSHMC8043Controller:
             raise ValueError(f"Channel must be between 1 and {self.num_channels}")
         
         print(f"Setting Channel {channel} current limit to {current} A")
-        self.psu.write(f'SOURce{channel}:CURRent {current}')
+        self.select_channel(channel)
+        self.psu.write(f'CURRent {current:.6f}')
+        self._wait_for_operation()
     
     def get_voltage_setpoint(self, channel: int) -> Optional[float]:
         """
@@ -132,11 +167,12 @@ class RSHMC8043Controller:
             raise ValueError(f"Channel must be between 1 and {self.num_channels}")
         
         try:
-            response = self.psu.query(f'SOURce{channel}:VOLTage?').strip()
+            self.select_channel(channel)
+            response = self.psu.query('VOLTage?').strip()
             voltage = float(response)
             return voltage
         except Exception as e:
-            print(f"Error reading voltage setpoint for Channel {channel}: {e}")
+            log.warning('HMC8043 CH%d voltage readback failed: %s', channel, e)
             return None
     
     def get_current_setpoint(self, channel: int) -> Optional[float]:
@@ -156,7 +192,8 @@ class RSHMC8043Controller:
             raise ValueError(f"Channel must be between 1 and {self.num_channels}")
         
         try:
-            response = self.psu.query(f'SOURce{channel}:CURRent?').strip()
+            self.select_channel(channel)
+            response = self.psu.query('CURRent?').strip()
             current = float(response)
             return current
         except Exception as e:
@@ -228,7 +265,7 @@ class RSHMC8043Controller:
             raise ValueError(f"Channel must be between 1 and {self.num_channels}")
         
         try:
-            self.psu.write(f'INSTrument:NSELect {channel}')
+            self.select_channel(channel)
             response = self.psu.query('OUTPut:STATe?').strip()
             return response == '1' or response.upper() == 'ON'
         except Exception as e:
