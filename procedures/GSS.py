@@ -1191,13 +1191,46 @@ class GateStressTest(Procedure):
             if psu is None:
                 continue
             psu_lock = self._psu_locks.get(resource, threading.Lock())
+            configured_channels = sorted({
+                ch
+                for cfg in self._configs
+                if cfg.psu_resource == resource
+                for ch in (cfg.psu_ch_pos, cfg.psu_ch_neg)
+            })
+            if not configured_channels and hasattr(psu, 'num_channels'):
+                try:
+                    configured_channels = list(range(1, int(psu.num_channels) + 1))
+                    log.warning(
+                        f'PSU {resource}: no configured channel map found; '
+                        f'falling back to disabling all {len(configured_channels)} channel(s)'
+                    )
+                except (TypeError, ValueError):
+                    log.warning(
+                        f'PSU {resource}: unable to derive channel count from num_channels; '
+                        'shutdown will target only explicitly configured channels'
+                    )
             try:
                 with psu_lock:
-                    for ch in range(1, 4):
+                    if hasattr(psu, 'enable_master_output'):
+                        try:
+                            psu.enable_master_output(False)
+                        except Exception as exc:
+                            log.warning(f'PSU {resource} master output disable failed: {exc}')
+                    if hasattr(psu, 'emergency_stop'):
+                        try:
+                            psu.emergency_stop()
+                        except Exception as exc:
+                            log.warning(f'PSU {resource} emergency stop failed: {exc}')
+                    if not configured_channels:
+                        log.warning(
+                            f'PSU {resource}: no target channels available for explicit '
+                            'disable; proceeding with disconnect only'
+                        )
+                    for ch in configured_channels:
                         try:
                             psu.enable_output(ch, False)
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            log.warning(f'PSU {resource} ch{ch} disable failed: {exc}')
                     psu.disconnect()
                     log.info(f'PSU {resource} outputs disabled and disconnected')
             except Exception as exc:
