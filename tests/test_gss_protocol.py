@@ -31,9 +31,11 @@ def test_batch_completion_uses_cycle_count_without_status_polling():
     controller = GSSController('/dev/null')
     controller._send_command = lambda command, timeout=None: 'GSS starting: cycles=1\nGSS_CTRL>'
     controller.get_cycle_count = lambda: 123
-    controller.is_running = lambda: (_ for _ in ()).throw(
-        AssertionError('status polling is unsupported by this firmware')
-    )
+
+    def unsupported_status():
+        raise AssertionError('status polling is unsupported by this firmware')
+
+    controller.is_running = unsupported_status
 
     clock = [0.0]
     with patch('hardware.gss_controller.time.time', side_effect=lambda: clock[0]), patch(

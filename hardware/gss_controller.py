@@ -613,11 +613,10 @@ class GSSController:
         response = self._send_command('measure_supply')
         if response is None:
             return (None, None)
-        number = r'[+-]?(?:\d+(?:\.\d*)?|\.\d+)'
-        pos_number = r'\+?-?(?:\d+(?:\.\d*)?|\.\d+)'
-        m = re.search(rf'POS:({pos_number})\s+NEG:({number})', response)
+        number = r'(?:\+-|[+-])?(?:\d+(?:\.\d*)?|\.\d+)'
+        m = re.search(rf'POS:({number})\s+NEG:({number})', response)
         if m:
-            return (float(m.group(1).replace('+-', '-')), float(m.group(2)))
+            return tuple(float(value.replace('+-', '-')) for value in m.groups())
         return (None, None)
 
     def select_dut(self, dut_index: int) -> bool:
