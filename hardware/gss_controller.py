@@ -615,7 +615,8 @@ class GSSController:
         response = self._send_command('measure_supply')
         if response is None:
             return (None, None)
-        # Firmware can prefix a negative POS ADC result with '+' (e.g. "+-0.34").
+        # Firmware can prefix a negative ADC result with '+' (e.g. "+-0.34").
+        # Match that literal form, then normalize it so both fields use float().
         voltage_value_pattern = r'(?:\+-|[+-])?(?:\d+(?:\.\d*)?|\.\d+)'
         m = re.search(
             rf'POS:({voltage_value_pattern})\s+NEG:({voltage_value_pattern})',

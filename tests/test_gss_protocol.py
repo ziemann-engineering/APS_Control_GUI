@@ -50,6 +50,7 @@ def test_cycle_count_does_not_match_batch_configuration():
         'GSS starting: cycles=1000, configured_frequency=1000.0 Hz'
     ) is None
     assert GSSController._extract_cycle_count('CYCLES 65006000\nGSS_CTRL>') == 65006000
+    assert GSSController._extract_cycle_count('GSS_CTRL>\nGSS_CYCLES = 65006000') == 65006000
 
 
 def test_hmc8043_selects_channel_before_changing_output_state():
