@@ -1191,13 +1191,34 @@ class GateStressTest(Procedure):
             if psu is None:
                 continue
             psu_lock = self._psu_locks.get(resource, threading.Lock())
+            configured_channels = sorted({
+                ch
+                for cfg in self._configs
+                if cfg.psu_resource == resource
+                for ch in (cfg.psu_ch_pos, cfg.psu_ch_neg)
+            })
+            if hasattr(psu, 'num_channels'):
+                try:
+                    configured_channels = sorted(set(configured_channels) | set(range(1, int(psu.num_channels) + 1)))
+                except Exception:
+                    pass
             try:
                 with psu_lock:
-                    for ch in range(1, 4):
+                    if hasattr(psu, 'enable_master_output'):
                         try:
-                            psu.enable_output(ch, False)
+                            psu.enable_master_output(False)
                         except Exception:
                             pass
+                    if hasattr(psu, 'emergency_stop'):
+                        try:
+                            psu.emergency_stop()
+                        except Exception:
+                            pass
+                    for ch in configured_channels:
+                        try:
+                            psu.enable_output(ch, False)
+                        except Exception as exc:
+                            log.warning(f'PSU {resource} ch{ch} disable failed: {exc}')
                     psu.disconnect()
                     log.info(f'PSU {resource} outputs disabled and disconnected')
             except Exception as exc:

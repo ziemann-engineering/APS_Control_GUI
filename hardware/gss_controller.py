@@ -347,12 +347,43 @@ class GSSController:
         """Return raw status string from controller."""
         return self._send_command('status')
 
+    @staticmethod
+    def _response_indicates_start_ack(response: str) -> bool:
+        """Return True if response text acknowledges batch start."""
+        text = response.lower().replace('_', ' ')
+        if 'started' in text:
+            return True
+        for line in response.splitlines():
+            stripped = line.strip().rstrip('>').lower()
+            if stripped == 'ok' or stripped.startswith('ok '):
+                return True
+        return False
+
+    @staticmethod
+    def _extract_cycle_count(response: str) -> Optional[int]:
+        """Extract a cycle count from firmware response text."""
+        for pattern in (
+            r'TEST_COMPLETE\s*[:=]?\s*(\d+)',
+            r'\bGSS_CYCLES\b\s*[:=]?\s*(\d+)',
+            r'\bCYCLES?\b\s*[:=]?\s*(\d+)',
+            r'\bTOTAL[_\s-]*CYCLES?\b\s*[:=]?\s*(\d+)',
+        ):
+            m = re.search(pattern, response, re.IGNORECASE)
+            if m:
+                return int(m.group(1))
+        return None
+
     def is_running(self) -> bool:
         """Return True if firmware reports an active GSS batch."""
         status = self.get_status()
         if status is None:
             raise GSSCommunicationError('No response to status command')
-        return 'test running' in status.lower() and 'gss' in status.lower()
+        s = status.lower()
+        if any(token in s for token in ('not running', 'idle', 'stopped', 'complete', 'ready')):
+            return False
+        if any(token in s for token in ('running', 'in progress', 'active', 'busy')):
+            return True
+        return 'test running' in s and 'gss' in s
 
     def run_batch(self, cycles: int, freq_hz: float, duty_cycle: float,
                   extra_timeout_s: float = 10.0,
@@ -412,13 +443,16 @@ class GSSController:
             return None
 
         # Backward-compatible path for older blocking firmware.
-        for line in response.splitlines():
-            m = re.search(r'TEST_COMPLETE\s+(\d+)', line)
-            if m:
-                return int(m.group(1))
+        completed = self._extract_cycle_count(response)
+        if completed is not None:
+            return completed
 
-        if 'OK_STARTED' not in response:
-            return None
+        if not self._response_indicates_start_ack(response):
+            try:
+                if not self.is_running():
+                    return self._extract_cycle_count(response)
+            except Exception:
+                return self._extract_cycle_count(response)
 
         deadline = time.time() + batch_duration_s + extra_timeout_s
         batch_start = time.time()
@@ -434,7 +468,9 @@ class GSSController:
                 return self.get_cycle_count()
 
             if not self.is_running():
-                return self.get_cycle_count()
+                count = self.get_cycle_count()
+                if count is not None:
+                    return count
 
             if on_progress is not None:
                 elapsed_s = time.time() - batch_start
@@ -568,8 +604,7 @@ class GSSController:
         response = self._send_command('GSS_cycles')
         if response is None:
             return None
-        m = re.search(r'CYCLES\s+(\d+)', response)
-        return int(m.group(1)) if m else None
+        return self._extract_cycle_count(response)
 
     def get_output_voltages(self) -> tuple:
         """Read positive and negative gate supply voltages.
