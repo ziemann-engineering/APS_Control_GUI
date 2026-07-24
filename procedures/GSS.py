@@ -1205,7 +1205,10 @@ class GateStressTest(Procedure):
                         f'falling back to disabling all {len(configured_channels)} channel(s)'
                     )
                 except (TypeError, ValueError):
-                    pass
+                    log.warning(
+                        f'PSU {resource}: unable to derive channel count from num_channels; '
+                        'shutdown will target only explicitly configured channels'
+                    )
             try:
                 with psu_lock:
                     if hasattr(psu, 'enable_master_output'):

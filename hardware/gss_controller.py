@@ -127,7 +127,15 @@ class GSSController:
     Methods that send firmware-specific commands are stubs that raise
     NotImplementedError until the firmware protocol is finalised.
     """
+    # Consecutive idle polls without parseable cycle count before declaring
+    # the batch result unavailable and letting outer retry logic recover.
     _MAX_IDLE_POLLS_WITHOUT_COUNT = 3
+    _CYCLE_COUNT_PATTERNS = (
+        re.compile(r'TEST_COMPLETE\s*[:=]?\s*(\d+)', re.IGNORECASE),
+        re.compile(r'\bGSS_CYCLES\b\s*[:=]?\s*(\d+)', re.IGNORECASE),
+        re.compile(r'\bCYCLES?\b\s*[:=]?\s*(\d+)', re.IGNORECASE),
+        re.compile(r'\bTOTAL[_\s-]*CYCLES?\b\s*[:=]?\s*(\d+)', re.IGNORECASE),
+    )
 
     # -----------------------------------------------------------------------
     # Construction & connection
@@ -363,13 +371,8 @@ class GSSController:
     @staticmethod
     def _extract_cycle_count(response: str) -> Optional[int]:
         """Extract a cycle count from firmware response text."""
-        for pattern in (
-            r'TEST_COMPLETE\s*[:=]?\s*(\d+)',
-            r'\bGSS_CYCLES\b\s*[:=]?\s*(\d+)',
-            r'\bCYCLES?\b\s*[:=]?\s*(\d+)',
-            r'\bTOTAL[_\s-]*CYCLES?\b\s*[:=]?\s*(\d+)',
-        ):
-            m = re.search(pattern, response, re.IGNORECASE)
+        for pattern in GSSController._CYCLE_COUNT_PATTERNS:
+            m = pattern.search(response)
             if m:
                 return int(m.group(1))
         return None
