@@ -454,7 +454,6 @@ class GSSController:
             return completed
 
         if not self._response_indicates_start_ack(response):
-            running = False
             try:
                 running = self.is_running()
             except GSSCommunicationError:
@@ -482,6 +481,7 @@ class GSSController:
             if not self.is_running():
                 count = self.get_cycle_count()
                 if count is not None:
+                    idle_polls_without_count = 0
                     return count
                 idle_polls_without_count += 1
                 if idle_polls_without_count >= self._MAX_IDLE_POLLS_WITHOUT_COUNT:
