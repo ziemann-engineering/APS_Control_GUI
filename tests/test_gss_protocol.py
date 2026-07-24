@@ -1,3 +1,5 @@
+from unittest.mock import patch
+
 from hardware.gss_controller import GSSController
 from hardware.rs_hmc8043 import RSHMC8043Controller
 
@@ -33,7 +35,12 @@ def test_batch_completion_uses_cycle_count_without_status_polling():
         AssertionError('status polling is unsupported by this firmware')
     )
 
-    assert controller.run_batch(1, 10_000, 0.5, extra_timeout_s=0) == 123
+    clock = [0.0]
+    with patch('hardware.gss_controller.time.time', side_effect=lambda: clock[0]), patch(
+        'hardware.gss_controller.time.sleep',
+        side_effect=lambda seconds: clock.__setitem__(0, clock[0] + seconds),
+    ):
+        assert controller.run_batch(1, 2, 0.5, extra_timeout_s=0) == 123
 
 
 def test_cycle_count_does_not_match_batch_configuration():
