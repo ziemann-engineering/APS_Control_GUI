@@ -132,8 +132,8 @@ class GSSController:
     _MAX_IDLE_POLLS_WITHOUT_COUNT = 3
     _CYCLE_COUNT_PATTERNS = (
         re.compile(r'TEST_COMPLETE\s*[:=]?\s*(\d+)', re.IGNORECASE),
-        re.compile(r'\bGSS_CYCLES\b\s*[:=]?\s*(\d+)', re.IGNORECASE),
-        re.compile(r'\bCYCLES?\b\s*[:=]?\s*(\d+)', re.IGNORECASE),
+        re.compile(r'^\s*GSS_CYCLES\b\s*[:=]?\s*(\d+)\b', re.IGNORECASE | re.MULTILINE),
+        re.compile(r'^\s*CYCLES?\b\s*[:=]?\s*(\d+)\b', re.IGNORECASE | re.MULTILINE),
         re.compile(r'\bTOTAL[_\s-]*CYCLES?\b\s*[:=]?\s*(\d+)', re.IGNORECASE),
     )
 
@@ -360,7 +360,7 @@ class GSSController:
     def _response_indicates_start_ack(response: str) -> bool:
         """Return True if response text acknowledges batch start."""
         text = response.lower().replace('_', ' ')
-        if 'started' in text:
+        if 'started' in text or 'starting' in text:
             return True
         for line in response.splitlines():
             stripped = line.strip().rstrip('>').lower()

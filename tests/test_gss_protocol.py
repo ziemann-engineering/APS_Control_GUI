@@ -36,6 +36,13 @@ def test_batch_completion_uses_cycle_count_without_status_polling():
     assert controller.run_batch(1, 10_000, 0.5, extra_timeout_s=0) == 123
 
 
+def test_cycle_count_does_not_match_batch_configuration():
+    assert GSSController._extract_cycle_count(
+        'GSS starting: cycles=1000, configured_frequency=1000.0 Hz'
+    ) is None
+    assert GSSController._extract_cycle_count('CYCLES 65006000\nGSS_CTRL>') == 65006000
+
+
 def test_hmc8043_selects_channel_before_changing_output_state():
     controller = RSHMC8043Controller.__new__(RSHMC8043Controller)
     controller.num_channels = 3
