@@ -132,8 +132,10 @@ class GSSController:
     _MAX_IDLE_POLLS_WITHOUT_COUNT = 3
     _CYCLE_COUNT_PATTERNS = (
         re.compile(r'TEST_COMPLETE\s*[:=]?\s*(\d+)', re.IGNORECASE),
-        re.compile(r'\bGSS_CYCLES\b\s*[:=]?\s*(\d+)', re.IGNORECASE),
-        re.compile(r'\bCYCLES?\b\s*[:=]?\s*(\d+)', re.IGNORECASE),
+        # Cycle reports occupy an entire response line; anchoring avoids
+        # mistaking "GSS starting: cycles=<requested>" for completion.
+        re.compile(r'^\s*GSS_CYCLES\b\s*[:=]?\s*(\d+)\b', re.IGNORECASE | re.MULTILINE),
+        re.compile(r'^\s*CYCLES?\b\s*[:=]?\s*(\d+)\b', re.IGNORECASE | re.MULTILINE),
         re.compile(r'\bTOTAL[_\s-]*CYCLES?\b\s*[:=]?\s*(\d+)', re.IGNORECASE),
     )
 
@@ -360,7 +362,7 @@ class GSSController:
     def _response_indicates_start_ack(response: str) -> bool:
         """Return True if response text acknowledges batch start."""
         text = response.lower().replace('_', ' ')
-        if 'started' in text:
+        if 'started' in text or 'starting' in text:
             return True
         for line in response.splitlines():
             stripped = line.strip().rstrip('>').lower()
@@ -464,31 +466,10 @@ class GSSController:
         deadline = time.time() + batch_duration_s + extra_timeout_s
         batch_start = time.time()
         poll_interval_s = max(0.1, poll_interval_s)
-        # Guard against false "idle" status parses where the controller has not
-        # yet published a parseable cycle count; after a few consecutive misses,
-        # report None so caller retry logic can recover.
-        idle_polls_without_count = 0
         while time.time() < deadline:
             if should_stop is not None and should_stop():
                 self.stop()
-                stop_deadline = time.time() + max(2.0, extra_timeout_s)
-                while time.time() < stop_deadline:
-                    if not self.is_running():
-                        return self.get_cycle_count()
-                    time.sleep(min(poll_interval_s, 0.5))
                 return self.get_cycle_count()
-
-            if not self.is_running():
-                count = self.get_cycle_count()
-                if count is not None:
-                    idle_polls_without_count = 0
-                    return count
-                idle_polls_without_count += 1
-                if idle_polls_without_count >= self._MAX_IDLE_POLLS_WITHOUT_COUNT:
-                    return None
-                time.sleep(poll_interval_s)
-                continue
-            idle_polls_without_count = 0
 
             if on_progress is not None:
                 elapsed_s = time.time() - batch_start
@@ -496,7 +477,7 @@ class GSSController:
                 on_progress(estimated)
 
             time.sleep(poll_interval_s)
-        return None
+        return self.get_cycle_count()
 
     def enter_dfu(self) -> None:
         """Send the dfu command.  The MCU pulls BOOT0 high via a capacitor and
@@ -634,9 +615,18 @@ class GSSController:
         response = self._send_command('measure_supply')
         if response is None:
             return (None, None)
-        m = re.search(r'POS:\+?([\d.]+)\s+NEG:([\-\d.]+)', response)
+        # Matches unsigned, conventional signed, and firmware's "+-" values
+        # (e.g. "0.00", "+0.00", "-0.34", "+-0.34", or ".5").
+        voltage_value_pattern = r'(?:\+-|[+-])?(?:\d+(?:\.\d*)?|\.\d+)'
+        m = re.search(
+            rf'POS:({voltage_value_pattern})\s+NEG:({voltage_value_pattern})',
+            response,
+        )
         if m:
-            return (float(m.group(1)), float(m.group(2)))
+            return tuple(
+                float(value.replace('+-', '-'))  # Normalize the firmware's "+-" sign.
+                for value in m.groups()
+            )
         return (None, None)
 
     def select_dut(self, dut_index: int) -> bool:

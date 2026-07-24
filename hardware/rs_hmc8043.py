@@ -78,7 +78,8 @@ class RSHMC8043Controller:
         
         state = "ON" if enabled else "OFF"
         print(f"Channel {channel} output: {state}")
-        self.psu.write(f'OUTPut{channel} {state}')
+        self.psu.write(f'INSTrument:NSELect {channel}')
+        self.psu.write(f'OUTPut:STATe {state}')
     
     def set_voltage(self, channel: int, voltage: float):
         """
@@ -227,7 +228,8 @@ class RSHMC8043Controller:
             raise ValueError(f"Channel must be between 1 and {self.num_channels}")
         
         try:
-            response = self.psu.query(f'OUTPut{channel}?').strip()
+            self.psu.write(f'INSTrument:NSELect {channel}')
+            response = self.psu.query('OUTPut:STATe?').strip()
             return response == '1' or response.upper() == 'ON'
         except Exception as e:
             print(f"Error reading output state for Channel {channel}: {e}")
