@@ -702,6 +702,8 @@ class GSSAllDeviceScanThread(QThread):
 
     _BAUDRATE = 38400
     _ID_CMD = b'*IDN?\r\n'
+    _SERIAL_PROBE_ATTEMPTS = 3
+    _SERIAL_PROBE_TIMEOUT_S = 1.0
 
     # List of known serial-port devices: (identifying substring in the *IDN?
     # reply, device type key).  The *IDN? response is compared against this
@@ -726,12 +728,25 @@ class GSSAllDeviceScanThread(QThread):
             self.progress.emit(f'Probing {port}…')
             try:
                 import serial as _serial
-                with _serial.Serial(port, self._BAUDRATE, timeout=0.5) as ser:
-                    ser.reset_input_buffer()
-                    ser.write(self._ID_CMD)
-                    time.sleep(0.3)
-                    data = ser.read(256).decode('ascii', errors='ignore')
-                    log.debug(f"Received from {port}: {data.strip()}")
+                data = ''
+                with _serial.Serial(port, self._BAUDRATE, timeout=0.1) as ser:
+                    for attempt in range(self._SERIAL_PROBE_ATTEMPTS):
+                        ser.reset_input_buffer()
+                        ser.write(self._ID_CMD)
+                        ser.flush()
+                        deadline = time.monotonic() + self._SERIAL_PROBE_TIMEOUT_S
+                        response = bytearray()
+                        while time.monotonic() < deadline:
+                            chunk = ser.read(256)
+                            if chunk:
+                                response.extend(chunk)
+                                if b'>' in response:
+                                    break
+                        data = response.decode('ascii', errors='ignore')
+                        if any(sig in data for sig, _ in self._KNOWN_SERIAL_DEVICES):
+                            break
+                        log.debug(f"No recognised response from {port} on probe {attempt + 1}")
+                log.debug(f"Received from {port}: {data.strip()}")
 
                 # Compare the response against the list of known devices.
                 dev_type = next(

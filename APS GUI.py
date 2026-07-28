@@ -12,6 +12,9 @@ import sys
 import toml
 from pathlib import Path
 
+# Keep Qt's scale independent of the desktop account's inherited Qt settings.
+os.environ['QT_SCALE_FACTOR'] = os.environ.get('APS_QT_SCALE_FACTOR', '1')
+
 from pymeasure.display.Qt import QtWidgets, QtCore
 from pymeasure.display.windows.managed_dock_window import ManagedDockWindow
 from pymeasure.experiment import unique_filename
@@ -22,6 +25,7 @@ from datetime import datetime
 from procedures.random import RandomProcedure
 
 log = logging.getLogger(__name__)
+APPLICATION_ICON = Path(__file__).resolve().with_name('ZE.png')
 # Ensure logs directory exists and configure file-based logging when possible.
 logs_dir = Path('./logs')
 log_filename = logs_dir / f"{datetime.now():%Y-%m-%d_%H-%M-%S}.log"
@@ -235,7 +239,7 @@ class MainWindow(ManagedDockWindow):
         self.file_input.filename_fixed = False                      # Controls whether the filename-field is frozen (but still displayed)
 
         self.setWindowTitle('ZE APS Measurement GUI')
-        self.setWindowIcon(QIcon('ze.png'))
+        self.setWindowIcon(QIcon(str(APPLICATION_ICON)))
 
         # Delay plot customization to ensure widgets are created
         QtCore.QTimer.singleShot(100, self._customize_plots)
@@ -1024,6 +1028,7 @@ class MainWindow(ManagedDockWindow):
 
 if __name__ == "__main__":
     app = QtWidgets.QApplication(sys.argv)
+    app.setWindowIcon(QIcon(str(APPLICATION_ICON)))
     
     # Show startup dialog first
     from startup_dialog import show_startup_dialog
