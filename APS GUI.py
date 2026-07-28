@@ -318,12 +318,21 @@ class MainWindow(ManagedDockWindow):
             getattr(results.procedure, 'internal_name', '') == 'Gate_Switching_Stress'
             and wdg is self.dock_widget
         ):
+            import pyqtgraph as pg
             from gss_plotting import new_dut_curves
+
+            if color is None:
+                color = pg.intColor(self.browser.topLevelItemCount() % 8)
+            controller_id = results.procedure.gss_serial or 'Unknown'
             return [
                 curve
                 for plot_widget in wdg.plot_frames
                 for curve in new_dut_curves(
-                    plot_widget, results, results.procedure.num_duts
+                    plot_widget,
+                    results,
+                    results.procedure.num_duts,
+                    color,
+                    controller_id,
                 )
             ]
         return super().new_curve(wdg, results, color=color, **kwargs)
