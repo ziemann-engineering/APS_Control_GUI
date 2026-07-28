@@ -571,24 +571,42 @@ class GSSController:
                        timeout_s: float = 60.0) -> Tuple[bool, str]:
         """Flash *firmware_path* using dfu-util.
 
-        Requires dfu-util to be on PATH (or specify full path in dfu_util_exe).
+        When multiple bootloaders are connected, flashes the first one reported
+        by ``dfu-util --list``.
 
         Returns
         -------
         (True, message) on success, (False, error_message) on failure.
         """
-        cmd = [
-            'dfu-util', '-a', '0',
-            '-s', '0x08000000:leave',
-            '-D', firmware_path,
-        ]
         try:
+            device_list = subprocess.run(
+                ['dfu-util', '--list'], capture_output=True, text=True,
+                timeout=timeout_s,
+            )
+            device_paths = re.findall(
+                r'\bpath="([^"]+)"',
+                (device_list.stdout or '') + (device_list.stderr or ''),
+            )
+            if not device_paths:
+                return (False, 'No DFU bootloader found. Put a controller into DFU mode and retry.')
+
+            cmd = [
+                'dfu-util', '-p', device_paths[0], '-a', '0',
+                '-s', '0x08000000:leave',
+                '-D', firmware_path,
+            ]
             result = subprocess.run(
                 cmd, capture_output=True, text=True, timeout=timeout_s
             )
             if result.returncode == 0:
                 return (True, 'Firmware flashed successfully.')
             err = (result.stderr or result.stdout or 'unknown error').strip()
+            if 'error during download get_status' in err.lower():
+                return (
+                    True,
+                    'Firmware transferred successfully; the controller reset '
+                    'before dfu-util received its final status.',
+                )
             return (False, err)
         except FileNotFoundError:
             return (False,

@@ -1,3 +1,4 @@
+from subprocess import CompletedProcess
 from unittest.mock import patch
 
 from hardware.gss_controller import GSSController
@@ -60,6 +61,44 @@ def test_cycle_count_does_not_match_batch_configuration():
     ) is None
     assert GSSController._extract_cycle_count('CYCLES 65006000\nGSS_CTRL>') == 65006000
     assert GSSController._extract_cycle_count('GSS_CTRL>\nGSS_CYCLES = 65006000') == 65006000
+
+
+def test_dfu_reset_before_final_status_is_reported_as_completed():
+    with patch('hardware.gss_controller.subprocess.run') as run:
+        run.side_effect = [
+            CompletedProcess(
+                ['dfu-util', '--list'], 0,
+                'Found DFU: [0483:df11] path="1-3.2", alt=0', '',
+            ),
+            CompletedProcess(
+                [], 74, '', 'dfu-util: Error during download get_status',
+            ),
+        ]
+
+        success, message = GSSController.run_dfu_update('firmware.bin')
+
+    assert success is True
+    assert 'transferred successfully' in message
+    assert run.call_args_list[1].args[0][0:3] == ['dfu-util', '-p', '1-3.2']
+
+
+def test_dfu_update_uses_first_detected_bootloader():
+    with patch('hardware.gss_controller.subprocess.run') as run:
+        run.side_effect = [
+            CompletedProcess(
+                ['dfu-util', '--list'], 0,
+                ('Found DFU: [0483:df11] path="1-3.2", alt=0\n'
+                 'Found DFU: [0483:df11] path="1-4.1", alt=0'),
+                '',
+            ),
+            CompletedProcess([], 0, '', ''),
+        ]
+
+        success, message = GSSController.run_dfu_update('firmware.bin')
+
+    assert success is True
+    assert message == 'Firmware flashed successfully.'
+    assert run.call_args_list[1].args[0][0:3] == ['dfu-util', '-p', '1-3.2']
 
 
 def test_hmc8043_selects_channel_before_changing_output_state():

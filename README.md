@@ -168,6 +168,7 @@ It is an OS-level tool, not a Python package, and must be available on `PATH`.
 To verify: `dfu-util --version`
 
 > **Note:** `dfu-util` is only needed if you use the *Flash GSS Firmware* feature in the startup dialog. The rest of the GUI works without it.
+> The `Invalid DFU suffix signature` warning is emitted by some firmware images and does not prevent a completed update. The controller may also reset before `dfu-util` receives its final status; the GUI reports this outcome as a completed transfer.
 
 ### 4.5 Deploy Scripts
 
