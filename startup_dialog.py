@@ -17,7 +17,7 @@ import inspect
 from pathlib import Path
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel,
-    QPushButton, QComboBox, QLineEdit, QGroupBox,
+    QPushButton, QComboBox, QLineEdit, QGroupBox, QWidget,
     QApplication, QFrame, QCheckBox, QMessageBox, QProgressDialog,
     QTableWidget, QTableWidgetItem, QHeaderView, QScrollArea, QSizePolicy,
     QAbstractItemView,
@@ -931,6 +931,7 @@ class GSSHardwareScanWidget(QGroupBox):
         self._combos = {}
         self._status_lbls = {}
         self._test_btns = {}
+        self._assignment_rows = []
         self._setup_ui()
 
     def _setup_ui(self):
@@ -983,10 +984,24 @@ class GSSHardwareScanWidget(QGroupBox):
 
         layout.addLayout(grid)
 
+        assignments_header = QHBoxLayout()
+        assignments_header.addWidget(QLabel('Controller Assignments:'))
+        assignments_header.addStretch()
+        add_assignment_btn = QPushButton('Add Controller')
+        add_assignment_btn.clicked.connect(self._add_assignment)
+        assignments_header.addWidget(add_assignment_btn)
+        layout.addLayout(assignments_header)
+
+        self._assignments_layout = QVBoxLayout()
+        self._assignments_layout.setContentsMargins(0, 0, 0, 0)
+        layout.addLayout(self._assignments_layout)
+        self._add_assignment()
+
     def _start_scan(self):
         if self._scan_thread and self._scan_thread.isRunning():
             return
         self._devices.clear()
+        self._clear_assignments()
         for dev_type, _ in self._ROWS:
             self._count_lbls[dev_type].setText('\u2026')
             combo = self._combos[dev_type]
@@ -1039,7 +1054,103 @@ class GSSHardwareScanWidget(QGroupBox):
         self._progress_lbl.setText(
             f'Scan complete. {totals}.' if totals else 'No devices found.'
         )
+        self._add_assignment()
         self._check_firmware_updates()
+
+    def _add_assignment(self, assignment=None):
+        """Add one controller-to-PSU/TCU assignment row."""
+        assignment = assignment or {}
+        row_widget = QWidget()
+        row_layout = QHBoxLayout(row_widget)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+
+        number_label = QLabel()
+        row_layout.addWidget(number_label)
+        row_layout.addWidget(QLabel('GSS'))
+        gss_combo = QComboBox()
+        row_layout.addWidget(gss_combo, 2)
+        row_layout.addWidget(QLabel('PSU'))
+        psu_combo = QComboBox()
+        row_layout.addWidget(psu_combo, 2)
+        row_layout.addWidget(QLabel('TCU'))
+        tcu_combo = QComboBox()
+        row_layout.addWidget(tcu_combo, 2)
+        remove_btn = QPushButton('Remove')
+        row_layout.addWidget(remove_btn)
+
+        row = {
+            'widget': row_widget,
+            'number_label': number_label,
+            'gss_combo': gss_combo,
+            'psu_combo': psu_combo,
+            'tcu_combo': tcu_combo,
+        }
+        remove_btn.clicked.connect(lambda: self._remove_assignment(row))
+        self._assignment_rows.append(row)
+        self._assignments_layout.addWidget(row_widget)
+        self._populate_assignment_row(row, assignment)
+        self._renumber_assignments()
+
+    def _clear_assignments(self):
+        for row in self._assignment_rows:
+            self._assignments_layout.removeWidget(row['widget'])
+            row['widget'].deleteLater()
+        self._assignment_rows.clear()
+
+    def _remove_assignment(self, row):
+        if len(self._assignment_rows) == 1:
+            return
+        self._assignment_rows.remove(row)
+        self._assignments_layout.removeWidget(row['widget'])
+        row['widget'].deleteLater()
+        self._renumber_assignments()
+
+    def _renumber_assignments(self):
+        for index, row in enumerate(self._assignment_rows, start=1):
+            row['number_label'].setText(f'#{index}')
+
+    def _populate_assignment_row(self, row, assignment=None):
+        assignment = assignment or {}
+        self._populate_assignment_combo(
+            row['gss_combo'], ('gss',), assignment.get('gss_serial', '')
+        )
+        self._populate_assignment_combo(
+            row['psu_combo'], ('nge103', 'hmc8043'), assignment.get('psu_serial', '')
+        )
+        self._populate_assignment_combo(
+            row['tcu_combo'], ('tcu',), assignment.get('tcu_serial', '')
+        )
+
+    def _populate_assignment_combo(self, combo, device_types, selected_serial):
+        combo.clear()
+        combo.addItem('(not assigned)', None)
+        selected_index = 0
+        for info in self._devices:
+            if info.get('type') not in device_types:
+                continue
+            combo.addItem(info.get('display', info.get('serial', '?')), info)
+            if info.get('serial') == selected_serial:
+                selected_index = combo.count() - 1
+        combo.setCurrentIndex(selected_index)
+
+    def _restore_discovery_rows(self):
+        for dev_type, _ in self._ROWS:
+            matching_devices = [
+                info for info in self._devices if info.get('type') == dev_type
+            ]
+            combo = self._combos[dev_type]
+            combo.clear()
+            if not matching_devices:
+                combo.addItem('(none saved)')
+                combo.setEnabled(False)
+                self._count_lbls[dev_type].setText('0 saved')
+                self._test_btns[dev_type].setEnabled(False)
+                continue
+            for info in matching_devices:
+                combo.addItem(info.get('display', info.get('serial', '?')), info)
+            combo.setEnabled(True)
+            self._count_lbls[dev_type].setText(f'{len(matching_devices)} saved')
+            self._test_btns[dev_type].setEnabled(True)
 
     def _check_firmware_updates(self):
         """Check all discovered GSS devices for available firmware updates."""
@@ -1136,65 +1247,79 @@ class GSSHardwareScanWidget(QGroupBox):
         return list(self._devices)
 
     def apply_saved_connections(self, saved_map: dict):
-        """Restore the last selected device for each GSS hardware row."""
-        device_keys = {
-            'gss': ('gss_controller', 'port'),
-            'tcu': ('tcu', 'port'),
-            'nge103': ('nge103_psu', 'resource'),
-            'hmc8043': ('hmc8043_psu', 'resource'),
-            'keithley': ('keithley_smu', 'resource'),
-        }
+        """Restore saved controller-to-PSU/TCU assignments."""
+        assignments = saved_map.get('gss_controller_configs', [])
+        if not assignments:
+            assignments = [{
+                'gss_serial': saved_map.get('gss_controller', {}).get('serial', ''),
+                'gss_connection': saved_map.get('gss_controller', {}).get('connection', ''),
+                'psu_serial': (
+                    saved_map.get('nge103_psu', {}).get('serial', '') or
+                    saved_map.get('hmc8043_psu', {}).get('serial', '')
+                ),
+                'psu_connection': (
+                    saved_map.get('nge103_psu', {}).get('connection', '') or
+                    saved_map.get('hmc8043_psu', {}).get('connection', '')
+                ),
+                'tcu_serial': saved_map.get('tcu', {}).get('serial', ''),
+                'tcu_connection': saved_map.get('tcu', {}).get('connection', ''),
+            }]
         self._devices.clear()
-        for dev_type, (connection_key, address_key) in device_keys.items():
-            saved = saved_map.get(connection_key, {})
-            serial = saved.get('serial', '') if isinstance(saved, dict) else ''
-            address = saved.get('connection', '') if isinstance(saved, dict) else ''
-            if not serial and not address:
+        self._clear_assignments()
+        device_fields = (
+            ('gss', 'gss_serial', 'gss_connection', 'port'),
+            ('tcu', 'tcu_serial', 'tcu_connection', 'port'),
+            ('nge103', 'psu_serial', 'psu_connection', 'resource'),
+        )
+        for assignment in assignments:
+            if not isinstance(assignment, dict):
                 continue
+            for dev_type, serial_key, connection_key, address_key in device_fields:
+                serial = assignment.get(serial_key, '')
+                address = assignment.get(connection_key, '')
+                if not serial and not address:
+                    continue
+                if any(
+                        info.get('type') == dev_type and
+                        info.get('serial') == serial and
+                        info.get(address_key) == address
+                        for info in self._devices):
+                    continue
+                self._devices.append({
+                    'type': dev_type,
+                    'serial': serial,
+                    address_key: address,
+                    'display': serial or address,
+                })
+            self._add_assignment(assignment)
 
-            info = {
-                'type': dev_type,
-                'serial': serial,
-                address_key: address,
-                'display': serial or address,
-            }
-            self._devices.append(info)
-            combo = self._combos[dev_type]
-            combo.clear()
-            combo.addItem(info['display'], info)
-            combo.setEnabled(True)
-            self._count_lbls[dev_type].setText('1 saved')
-            self._test_btns[dev_type].setEnabled(True)
-
-        if self._devices:
+        if not self._assignment_rows:
+            self._add_assignment()
+        self._restore_discovery_rows()
+        if assignments:
             self._progress_lbl.setText(
                 'Restored last used hardware. Scan All Devices to rescan.'
             )
 
     def get_connection_parameters(self) -> dict:
         """Return a dict compatible with HardwareConfigWidget output."""
-        result = {}
-        for dev_type, _ in self._ROWS:
-            combo = self._combos[dev_type]
-            info = combo.currentData()
-            if not info:
+        assignments = []
+        for index, row in enumerate(self._assignment_rows, start=1):
+            gss_info = row['gss_combo'].currentData()
+            if not gss_info:
                 continue
-            if dev_type == 'gss':
-                result['gss_controller'] = {'connection': info.get('port', ''),
-                                             'serial': info.get('serial', '')}
-            elif dev_type == 'tcu':
-                result['tcu'] = {'connection': info.get('port', ''),
-                                 'serial': info.get('serial', '')}
-            elif dev_type == 'nge103':
-                result['nge103_psu'] = {'connection': info.get('resource', ''),
-                                         'serial': info.get('serial', '')}
-            elif dev_type == 'hmc8043':
-                result['hmc8043_psu'] = {'connection': info.get('resource', ''),
-                                          'serial': info.get('serial', '')}
-            elif dev_type == 'keithley':
-                result['keithley_smu'] = {'connection': info.get('resource', ''),
-                                           'serial': info.get('serial', '')}
-        return result
+            psu_info = row['psu_combo'].currentData() or {}
+            tcu_info = row['tcu_combo'].currentData() or {}
+            assignments.append({
+                'id': f'Ctrl{index}',
+                'gss_serial': gss_info.get('serial', ''),
+                'gss_connection': gss_info.get('port', ''),
+                'psu_serial': psu_info.get('serial', ''),
+                'psu_connection': psu_info.get('resource', ''),
+                'tcu_serial': tcu_info.get('serial', ''),
+                'tcu_connection': tcu_info.get('port', ''),
+            })
+        return {'gss_controller_configs': assignments}
 
 
 

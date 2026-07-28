@@ -1031,41 +1031,57 @@ class GateStressTest(Procedure):
 
         self._apply_connection_parameters()
 
-        # Build the (single) controller config from the individual parameters.
-        # Resolve serial numbers → actual connection strings via device registry.
-        # Fallback: use the serial string directly (allows manual entry).
-        _gss_info = _DEVICE_REGISTRY.get(self.gss_serial, {})
-        _psu_info = _DEVICE_REGISTRY.get(self.psu_serial, {})
-        _tcu_info = _DEVICE_REGISTRY.get(self.tcu_serial, {})
-        _gss_port    = _gss_info.get('port',     self.gss_serial)
-        _psu_res     = _psu_info.get('resource', self.psu_serial)
-        _tcu_port    = _tcu_info.get('port',     self.tcu_serial)
-        self._configs = [ControllerConfig(
-            id='Ctrl1',
-            port=_gss_port,
-            gss_serial=self.gss_serial,
-            num_duts=self.num_duts,
-            freq_hz=self.freq_hz,
-            duty_cycle=self.duty_cycle,
-            vth_method=self.vth_method,
-            vth_current_ma=self.vth_current_ma,
-            vth_precond_voltage=self.vth_precond_voltage,
-            vth_ramp_start_voltage=self.vth_ramp_start_voltage,
-            vth_ramp_stop_voltage=self.vth_ramp_stop_voltage,
-            vth_ramp_step_voltage=self.vth_ramp_step_voltage,
-            vth_threshold_current=self.vth_current_ma * 1e-3,
-            vth_compliance_voltage=self.vth_compliance_voltage,
-            psu_resource=_psu_res,
-            psu_serial=self.psu_serial,
-            psu_ch_pos=self.psu_ch_pos,
-            psu_ch_neg=self.psu_ch_neg,
-            v_gate_on=self.v_gate_on,
-            v_gate_off=self.v_gate_off,
-            tcu_port=_tcu_port,
-            tcu_serial=self.tcu_serial,
-            tcu_channel=self.tcu_channel,
-            temperature_c=self.temperature_c,
-        )]
+        # Build controller configs from the assignments selected in the startup
+        # dialog. Fall back to the legacy single-controller inputs so existing
+        # saved experiments continue to work.
+        connection_params = getattr(self, 'connection_parameters', {}) or {}
+        configured_controllers = connection_params.get('gss_controller_configs', [])
+        if not configured_controllers:
+            configured_controllers = [{
+                'id': 'Ctrl1',
+                'gss_serial': self.gss_serial,
+                'psu_serial': self.psu_serial,
+                'tcu_serial': self.tcu_serial,
+            }]
+
+        for index, configured in enumerate(configured_controllers, start=1):
+            if not isinstance(configured, dict):
+                continue
+            gss_serial = configured.get('gss_serial', '')
+            psu_serial = configured.get('psu_serial', '')
+            tcu_serial = configured.get('tcu_serial', '')
+            gss_info = _DEVICE_REGISTRY.get(gss_serial, {})
+            psu_info = _DEVICE_REGISTRY.get(psu_serial, {})
+            tcu_info = _DEVICE_REGISTRY.get(tcu_serial, {})
+            self._configs.append(ControllerConfig(
+                id=configured.get('id') or f'Ctrl{index}',
+                port=configured.get('gss_connection') or gss_info.get('port', gss_serial),
+                gss_serial=gss_serial,
+                num_duts=self.num_duts,
+                freq_hz=self.freq_hz,
+                duty_cycle=self.duty_cycle,
+                vth_method=self.vth_method,
+                vth_current_ma=self.vth_current_ma,
+                vth_precond_voltage=self.vth_precond_voltage,
+                vth_ramp_start_voltage=self.vth_ramp_start_voltage,
+                vth_ramp_stop_voltage=self.vth_ramp_stop_voltage,
+                vth_ramp_step_voltage=self.vth_ramp_step_voltage,
+                vth_threshold_current=self.vth_current_ma * 1e-3,
+                vth_compliance_voltage=self.vth_compliance_voltage,
+                psu_resource=configured.get('psu_connection') or psu_info.get('resource', psu_serial),
+                psu_serial=psu_serial,
+                psu_ch_pos=self.psu_ch_pos,
+                psu_ch_neg=self.psu_ch_neg,
+                v_gate_on=self.v_gate_on,
+                v_gate_off=self.v_gate_off,
+                tcu_port=configured.get('tcu_connection') or tcu_info.get('port', tcu_serial),
+                tcu_serial=tcu_serial,
+                tcu_channel=self.tcu_channel,
+                temperature_c=self.temperature_c,
+            ))
+
+        if not self._configs:
+            raise ValueError('No valid GSS controller assignments were provided')
 
         # Connect shared SMU — resolve serial number → VISA resource
         self._smu = None
