@@ -316,10 +316,16 @@ class MainWindow(ManagedDockWindow):
         """Create one GSS plot curve for each DUT instead of one mixed trace."""
         if (
             getattr(results.procedure, 'internal_name', '') == 'Gate_Switching_Stress'
-            and wdg is self.plot_widget
+            and wdg is self.dock_widget
         ):
             from gss_plotting import new_dut_curves
-            return new_dut_curves(wdg, results, results.procedure.num_duts)
+            return [
+                curve
+                for plot_widget in wdg.plot_frames
+                for curve in new_dut_curves(
+                    plot_widget, results, results.procedure.num_duts
+                )
+            ]
         return super().new_curve(wdg, results, color=color, **kwargs)
 
     def _make_inputs_compact(self):
