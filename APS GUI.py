@@ -312,6 +312,16 @@ class MainWindow(ManagedDockWindow):
         # Restore saved input parameters after UI is fully ready
         QtCore.QTimer.singleShot(200, self._restore_input_parameters)
 
+    def new_curve(self, wdg, results, color=None, **kwargs):
+        """Create one GSS plot curve for each DUT instead of one mixed trace."""
+        if (
+            getattr(results.procedure, 'internal_name', '') == 'Gate_Switching_Stress'
+            and wdg is self.plot_widget
+        ):
+            from gss_plotting import new_dut_curves
+            return new_dut_curves(wdg, results, results.procedure.num_duts)
+        return super().new_curve(wdg, results, color=color, **kwargs)
+
     def _make_inputs_compact(self):
         """Re-layout pymeasure's auto-generated InputsWidget so each label and
         its entry field sit on the same row ("Label: [field]") instead of the

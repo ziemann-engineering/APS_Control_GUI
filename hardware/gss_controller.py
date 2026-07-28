@@ -24,7 +24,7 @@ import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Callable, Optional, Sequence, Tuple
+from typing import Callable, Optional, Tuple
 
 
 import datetime
@@ -398,7 +398,7 @@ class GSSController:
                   poll_interval_s: float = 0.5,
                   should_stop: Optional[Callable[[], bool]] = None,
                   on_progress: Optional[Callable[[int], None]] = None,
-                  dut_channels: Optional[Sequence[int]] = None) -> Optional[int]:
+                  dut_channels=None) -> Optional[int]:
         """Run one batch of *cycles* switching cycles and block until done.
 
         Parameters
