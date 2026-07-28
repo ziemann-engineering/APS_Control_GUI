@@ -22,7 +22,7 @@ from pymeasure.display.Qt import QtWidgets, QtCore
 from pymeasure.display.windows.managed_dock_window import ManagedDockWindow
 from pymeasure.experiment import unique_filename
 
-from PyQt5.QtGui import QIcon
+from PyQt5.QtGui import QFont, QIcon
 from datetime import datetime
 
 from procedures.random import RandomProcedure
@@ -1033,6 +1033,9 @@ if __name__ == "__main__":
     QtCore.QCoreApplication.setAttribute(QtCore.Qt.AA_DisableHighDpiScaling)
     QtCore.QCoreApplication.setAttribute(QtCore.Qt.AA_Use96Dpi)
     app = QtWidgets.QApplication(sys.argv)
+    application_font = QFont(app.font())
+    application_font.setPointSize(10)
+    app.setFont(application_font)
     app.setDesktopFileName('ze-aps-gui')
     app.setWindowIcon(QIcon(str(APPLICATION_ICON)))
     
