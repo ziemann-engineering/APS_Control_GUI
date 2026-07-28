@@ -6,6 +6,14 @@ from procedures.GSS import ControllerConfig, GSSWorker
 
 class FakeProcedure:
     vth_method = 'ramp_voltage'
+    target_cycles = 1
+    batch_duration_min = 1
+    vth_interval_min = 60
+    pre_start_vth = False
+    post_shutdown_vth = False
+    hardware_retry_count = 1
+    hardware_retry_delay_s = 1
+    operator_retry_wait_s = 1
 
     @staticmethod
     def should_stop():
@@ -37,6 +45,16 @@ class FakeGSSController:
     def select_dut(self, dut):
         self.selected.append(dut)
         self.events.append(f'{self.name}-select-{dut}')
+
+    def run_batch(self, **kwargs):
+        self.events.append(f'{self.name}-switch')
+        return 1
+
+    def get_cycle_count(self):
+        return 1
+
+    def get_output_voltages(self):
+        return 15.0, -5.0
 
 
 def make_worker(name, smu, smu_lock, events):
@@ -75,3 +93,22 @@ def test_smu_lock_covers_dut_selection_measurement_and_deselection():
     assert first.controller.selected == [1, 0]
     assert second.controller.selected == [1, 0]
     assert events.index('GSS-A-select-0') < events.index('GSS-B-select-1')
+
+
+def test_switching_does_not_wait_for_another_controllers_vth_lock():
+    events = []
+    smu = BlockingSMU(events)
+    smu_lock = threading.RLock()
+    worker = make_worker('GSS-A', smu, smu_lock, events)
+
+    smu_lock.acquire()
+    try:
+        switching = threading.Thread(target=worker._run_batches)
+        switching.start()
+        switching.join(timeout=1.0)
+
+        assert not switching.is_alive()
+        assert 'GSS-A-switch' in events
+        assert worker.controller.selected == []
+    finally:
+        smu_lock.release()

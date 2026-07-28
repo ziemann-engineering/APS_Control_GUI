@@ -292,7 +292,6 @@ class GSSWorker:
             planned_cycles = int(self.cfg.freq_hz * batch_duration_s)
             batch_cycles = max(1, min(remaining, planned_cycles, self._MAX_FIRMWARE_BATCH_CYCLES))
 
-            self._select_dut_for_measurement(0)
             self.status = 'switching'
             self.batch_number += 1
             log.info(
