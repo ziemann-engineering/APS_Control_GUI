@@ -28,6 +28,8 @@ from procedures.random import RandomProcedure
 
 log = logging.getLogger(__name__)
 APPLICATION_ICON = Path(__file__).resolve().with_name('ZE.png')
+SETTINGS_FILE = Path(__file__).resolve().with_name('settings.toml')
+DEFAULT_SETTINGS_FILE = Path(__file__).resolve().with_name('settings_defaults.toml')
 # Ensure logs directory exists and configure file-based logging when possible.
 logs_dir = Path('./logs')
 log_filename = logs_dir / f"{datetime.now():%Y-%m-%d_%H-%M-%S}.log"
@@ -49,8 +51,9 @@ except Exception:
 class SettingsManager:
     """TOML-based settings manager for persistent application configuration."""
     
-    def __init__(self, settings_file='settings.toml'):
+    def __init__(self, settings_file=SETTINGS_FILE, defaults_file=DEFAULT_SETTINGS_FILE):
         self.settings_file = Path(settings_file)
+        self.defaults_file = Path(defaults_file)
         self._settings = {}
         self._load_settings()
     
@@ -60,6 +63,10 @@ class SettingsManager:
             if self.settings_file.exists():
                 with open(self.settings_file, 'r', encoding='utf-8') as f:
                     self._settings = toml.load(f)
+            elif self.defaults_file.exists():
+                with open(self.defaults_file, 'r', encoding='utf-8') as f:
+                    self._settings = toml.load(f)
+                self._save_settings()
             else:
                 # Create default settings structure
                 self._settings = {

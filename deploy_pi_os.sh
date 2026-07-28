@@ -90,12 +90,26 @@ if [ "$MODE" = 'setup' ]; then
       echo 'WARNING: Could not reach the repository; continuing with the downloaded project files.'
     fi
   else
-    echo 'Git repository found - pulling latest changes...'
-    git pull --ff-only origin main
+    echo 'Git repository found - replacing tracked local changes with origin/main...'
+    git fetch origin main
+    if git ls-files --error-unmatch settings.toml >/dev/null 2>&1 && [ -f settings.toml ]; then
+      cp settings.toml settings.toml.local-backup
+    fi
+    git reset --hard origin/main
+    if [ -f settings.toml.local-backup ] && [ ! -f settings.toml ]; then
+      mv settings.toml.local-backup settings.toml
+    fi
   fi
 elif [ "$HAS_GIT_CHECKOUT" = true ]; then
-  echo 'Git repository found - pulling latest changes...'
-  git pull --ff-only origin main
+  echo 'Git repository found - replacing tracked local changes with origin/main...'
+  git fetch origin main
+  if git ls-files --error-unmatch settings.toml >/dev/null 2>&1 && [ -f settings.toml ]; then
+    cp settings.toml settings.toml.local-backup
+  fi
+  git reset --hard origin/main
+  if [ -f settings.toml.local-backup ] && [ ! -f settings.toml ]; then
+    mv settings.toml.local-backup settings.toml
+  fi
 fi
 
 # ---------------------------------------------------------------------------
