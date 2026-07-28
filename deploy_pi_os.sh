@@ -3,6 +3,8 @@
 set -euo pipefail
 
 REPO_URL='https://github.com/veloyage/Python-Software.git'
+GSS_FIRMWARE_URL='https://raw.githubusercontent.com/ziemann-engineering/GSS_control_firmware/main/build/GSS_CONTROL.bin'
+GSS_FIRMWARE_PATH='firmware/GSS_CONTROL.bin'
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 MODE=${1:-setup}
 
@@ -131,7 +133,21 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 
 # ---------------------------------------------------------------------------
-# 6. Install a per-user desktop launcher so the Linux panel can identify the app
+# 6. Download the current GSS controller firmware
+# ---------------------------------------------------------------------------
+mkdir -p "$(dirname "$GSS_FIRMWARE_PATH")"
+echo 'Downloading the latest GSS controller firmware...'
+if curl --fail --location --silent --show-error \
+  --output "${GSS_FIRMWARE_PATH}.tmp" "$GSS_FIRMWARE_URL"; then
+  mv "${GSS_FIRMWARE_PATH}.tmp" "$GSS_FIRMWARE_PATH"
+  echo "Saved GSS firmware to $GSS_FIRMWARE_PATH"
+else
+  rm -f "${GSS_FIRMWARE_PATH}.tmp"
+  echo "WARNING: Could not download GSS firmware; retaining any existing file at $GSS_FIRMWARE_PATH."
+fi
+
+# ---------------------------------------------------------------------------
+# 7. Install a per-user desktop launcher so the Linux panel can identify the app
 # ---------------------------------------------------------------------------
 INSTALL_USER=${SUDO_USER:-$USER}
 INSTALL_HOME=$(getent passwd "$INSTALL_USER" | cut -d: -f6)
@@ -156,7 +172,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 7. Smoke-test key imports. If any fail, check if system packages are accessible in the virtual environment.
+# 8. Smoke-test key imports. If any fail, check if system packages are accessible in the virtual environment.
 # ---------------------------------------------------------------------------
 echo 'Verifying key packages...'
 python -c 'import PyQt5; import pyqtgraph; import pymeasure; import pyvisa'
