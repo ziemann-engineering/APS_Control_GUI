@@ -702,8 +702,9 @@ class GSSAllDeviceScanThread(QThread):
 
     _BAUDRATE = 38400
     _ID_CMD = b'*IDN?\r\n'
-    _SERIAL_PROBE_ATTEMPTS = 3
-    _SERIAL_PROBE_TIMEOUT_S = 1.0
+    _SERIAL_PROBE_ATTEMPTS = 1
+    _SERIAL_PROBE_TIMEOUT_S = 0.3
+    _VISA_PROBE_TIMEOUT_MS = 750
 
     # List of known serial-port devices: (identifying substring in the *IDN?
     # reply, device type key).  The *IDN? response is compared against this
@@ -729,7 +730,7 @@ class GSSAllDeviceScanThread(QThread):
             try:
                 import serial as _serial
                 data = ''
-                with _serial.Serial(port, self._BAUDRATE, timeout=0.1) as ser:
+                with _serial.Serial(port, self._BAUDRATE, timeout=0.05) as ser:
                     for attempt in range(self._SERIAL_PROBE_ATTEMPTS):
                         ser.reset_input_buffer()
                         ser.write(self._ID_CMD)
@@ -795,7 +796,7 @@ class GSSAllDeviceScanThread(QThread):
             self.progress.emit(f'Querying {res}…')
             try:
                 with rm.open_resource(res) as inst:
-                    inst.timeout = 2000
+                    inst.timeout = self._VISA_PROBE_TIMEOUT_MS
                     idn = inst.query('*IDN?').strip()
                 idn_u = idn.upper()
                 parts = [p.strip() for p in idn.split(',')]
@@ -1136,96 +1137,65 @@ class GSSHardwareScanWidget(QGroupBox):
         return list(self._devices)
 
     def apply_saved_connections(self, saved_map: dict):
-        """Restore saved controller-to-PSU/TCU assignments."""
-        assignments = saved_map.get('gss_controller_configs', [])
-        if not assignments:
-            assignments = [{
-                'gss_serial': saved_map.get('gss_controller', {}).get('serial', ''),
-                'gss_connection': saved_map.get('gss_controller', {}).get('connection', ''),
-                'psu_serial': (
-                    saved_map.get('nge103_psu', {}).get('serial', '') or
-                    saved_map.get('hmc8043_psu', {}).get('serial', '')
-                ),
-                'psu_connection': (
-                    saved_map.get('nge103_psu', {}).get('connection', '') or
-                    saved_map.get('hmc8043_psu', {}).get('connection', '')
-                ),
-                'tcu_serial': saved_map.get('tcu', {}).get('serial', ''),
-                'tcu_connection': saved_map.get('tcu', {}).get('connection', ''),
-            }]
-        self._devices.clear()
-        self._clear_assignments()
-        device_fields = (
-            ('gss', 'gss_serial', 'gss_connection', 'port'),
-            ('tcu', 'tcu_serial', 'tcu_connection', 'port'),
-            ('nge103', 'psu_serial', 'psu_connection', 'resource'),
-        )
-        for assignment in assignments:
-            if not isinstance(assignment, dict):
+        """Restore every saved dropdown option and its last selection."""
+        devices = saved_map.get('gss_discovered_devices', [])
+        selections = saved_map.get('gss_selected_devices', {})
+        if not isinstance(devices, list):
+            return
+
+        self._devices = [device for device in devices if isinstance(device, dict)]
+        for dev_type, _ in self._ROWS:
+            combo = self._combos[dev_type]
+            combo.clear()
+            matching_devices = [
+                device for device in self._devices if device.get('type') == dev_type
+            ]
+            if not matching_devices:
+                combo.addItem('(none saved)')
+                combo.setEnabled(False)
+                self._count_lbls[dev_type].setText('0 saved')
+                self._test_btns[dev_type].setEnabled(False)
                 continue
-            for dev_type, serial_key, connection_key, address_key in device_fields:
-                serial = assignment.get(serial_key, '')
-                address = assignment.get(connection_key, '')
-                if not serial and not address:
-                    continue
-                if any(
-                        info.get('type') == dev_type and
-                        info.get('serial') == serial and
-                        info.get(address_key) == address
-                        for info in self._devices):
-                    continue
-                self._devices.append({
-                    'type': dev_type,
-                    'serial': serial,
-                    address_key: address,
-                    'display': serial or address,
-                })
-            self._add_assignment(assignment)
 
-        saved_smu = saved_map.get('keithley_smu', {})
-        if isinstance(saved_smu, dict):
-            smu_serial = saved_smu.get('serial', '')
-            smu_resource = saved_smu.get('connection', '')
-            if smu_serial or smu_resource:
-                self._devices.append({
-                    'type': 'keithley',
-                    'serial': smu_serial,
-                    'resource': smu_resource,
-                    'display': smu_serial or smu_resource,
-                })
+            selected_serial = selections.get(dev_type, '')
+            selected_index = 0
+            for index, device in enumerate(matching_devices):
+                combo.addItem(
+                    device.get('display', device.get('serial', '?')), device
+                )
+                if device.get('serial') == selected_serial:
+                    selected_index = index
+            combo.setCurrentIndex(selected_index)
+            combo.setEnabled(True)
+            self._count_lbls[dev_type].setText(f'{len(matching_devices)} saved')
+            self._test_btns[dev_type].setEnabled(True)
 
-        if not self._assignment_rows:
-            self._add_assignment()
-        self._restore_discovery_rows()
-        if assignments:
+        if self._devices:
             self._progress_lbl.setText(
                 'Restored last used hardware. Scan All Devices to rescan.'
             )
 
     def get_connection_parameters(self) -> dict:
         """Return a dict compatible with HardwareConfigWidget output."""
-        assignments = []
-        for index, row in enumerate(self._assignment_rows, start=1):
-            gss_info = row['gss_combo'].currentData()
-            if not gss_info:
+        result = {
+            'gss_discovered_devices': self.get_discovered_devices(),
+            'gss_selected_devices': {},
+        }
+        connection_keys = {
+            'gss': 'gss_controller',
+            'tcu': 'tcu',
+            'nge103': 'nge103_psu',
+            'hmc8043': 'hmc8043_psu',
+            'keithley': 'keithley_smu',
+        }
+        for dev_type, connection_key in connection_keys.items():
+            info = self._combos[dev_type].currentData()
+            if not info:
                 continue
-            psu_info = row['psu_combo'].currentData() or {}
-            tcu_info = row['tcu_combo'].currentData() or {}
-            assignments.append({
-                'id': f'Ctrl{index}',
-                'gss_serial': gss_info.get('serial', ''),
-                'gss_connection': gss_info.get('port', ''),
-                'psu_serial': psu_info.get('serial', ''),
-                'psu_connection': psu_info.get('resource', ''),
-                'tcu_serial': tcu_info.get('serial', ''),
-                'tcu_connection': tcu_info.get('port', ''),
-            })
-        result = {'gss_controller_configs': assignments}
-        smu_info = self._combos['keithley'].currentData()
-        if smu_info:
-            result['keithley_smu'] = {
-                'connection': smu_info.get('resource', ''),
-                'serial': smu_info.get('serial', ''),
+            result['gss_selected_devices'][dev_type] = info.get('serial', '')
+            result[connection_key] = {
+                'connection': info.get('port', info.get('resource', '')),
+                'serial': info.get('serial', ''),
             }
         return result
 
