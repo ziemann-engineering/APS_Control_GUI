@@ -471,6 +471,14 @@ class GSSController:
                 self.stop()
                 return self.get_cycle_count()
 
+            message = self.read_message(timeout=0.0)
+            if message is not None:
+                completed = self._extract_cycle_count(message)
+                if completed is not None:
+                    return completed
+                if 'test complete' in message.lower().replace('_', ' '):
+                    return self.get_cycle_count()
+
             if on_progress is not None:
                 elapsed_s = time.time() - batch_start
                 estimated = min(cycles, int(freq_hz * max(0.0, elapsed_s)))

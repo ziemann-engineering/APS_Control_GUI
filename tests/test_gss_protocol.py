@@ -45,6 +45,15 @@ def test_batch_completion_uses_cycle_count_without_status_polling():
         assert controller.run_batch(1, 2, 0.5, extra_timeout_s=0) == 123
 
 
+def test_batch_completion_uses_async_test_complete_message():
+    controller = GSSController('/dev/null')
+    controller._send_command = lambda command, timeout=None: 'OK_STARTED\nGSS_CTRL>'
+    controller.read_message = lambda timeout=0.0: 'TEST_COMPLETE: 123'
+    controller.get_cycle_count = lambda: 999
+
+    assert controller.run_batch(1_000, 1, 0.5) == 123
+
+
 def test_cycle_count_does_not_match_batch_configuration():
     assert GSSController._extract_cycle_count(
         'GSS starting: cycles=1000, configured_frequency=1000.0 Hz'
