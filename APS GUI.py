@@ -203,6 +203,24 @@ class MainWindow(ManagedDockWindow):
             y_axis=y_axis
         )
 
+        if getattr(procedure_class, 'internal_name', '') == 'Gate_Switching_Stress':
+            from gss_parallel_manager import GSSParallelManager
+
+            old_manager = self.manager
+            self.manager = GSSParallelManager(
+                self.widget_list,
+                self.browser,
+                log_level=self.log_level,
+                parent=self,
+            )
+            self.manager.abort_returned.connect(self.abort_returned)
+            self.manager.queued.connect(self.queued)
+            self.manager.running.connect(self.running)
+            self.manager.finished.connect(self.finished)
+            self.manager.log.connect(self.log.handle)
+            old_manager.deleteLater()
+            log.info('GSS parallel experiment manager enabled')
+
         # Re-layout the parameter inputs so each label sits inline with its
         # entry field (instead of stacked above it), which is much more
         # compact for procedures with many parameters.
@@ -1027,6 +1045,18 @@ class MainWindow(ManagedDockWindow):
                 self.resume()
         except Exception:
             log.debug('Failed to auto-resume after queue', exc_info=True)
+
+    def abort_returned(self, experiment):
+        """Keep controls enabled until every parallel run has returned."""
+        if self.manager.is_running():
+            return
+        super().abort_returned(experiment)
+
+    def finished(self, experiment):
+        """Do not mark a parallel GSS window idle while another run is active."""
+        if self.manager.is_running() or self.manager.experiments.has_next():
+            return
+        super().finished(experiment)
 
 
 if __name__ == "__main__":
