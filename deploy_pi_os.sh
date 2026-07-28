@@ -90,26 +90,12 @@ if [ "$MODE" = 'setup' ]; then
       echo 'WARNING: Could not reach the repository; continuing with the downloaded project files.'
     fi
   else
-    echo 'Git repository found - replacing tracked local changes with origin/main...'
-    git fetch origin main
-    if git ls-files --error-unmatch settings.toml >/dev/null 2>&1 && [ -f settings.toml ]; then
-      cp settings.toml settings.toml.local-backup
-    fi
-    git reset --hard origin/main
-    if [ -f settings.toml.local-backup ] && [ ! -f settings.toml ]; then
-      mv settings.toml.local-backup settings.toml
-    fi
+    echo 'Git repository found - pulling latest changes...'
+    git pull --ff-only origin main
   fi
 elif [ "$HAS_GIT_CHECKOUT" = true ]; then
-  echo 'Git repository found - replacing tracked local changes with origin/main...'
-  git fetch origin main
-  if git ls-files --error-unmatch settings.toml >/dev/null 2>&1 && [ -f settings.toml ]; then
-    cp settings.toml settings.toml.local-backup
-  fi
-  git reset --hard origin/main
-  if [ -f settings.toml.local-backup ] && [ ! -f settings.toml ]; then
-    mv settings.toml.local-backup settings.toml
-  fi
+  echo 'Git repository found - pulling latest changes...'
+  git pull --ff-only origin main
 fi
 
 # ---------------------------------------------------------------------------
@@ -157,7 +143,7 @@ if [ -n "$INSTALL_HOME" ] && [ -d "$INSTALL_HOME" ]; then
 Type=Application
 Name=ZE APS Measurement GUI
 Comment=ZE automated power semiconductor measurement system
-Exec=env QT_AUTO_SCREEN_SCALE_FACTOR=0 QT_ENABLE_HIGHDPI_SCALING=0 QT_SCALE_FACTOR=1 "$SCRIPT_DIR/.venv/bin/python" "$SCRIPT_DIR/APS GUI.py"
+Exec=env QT_AUTO_SCREEN_SCALE_FACTOR=0 QT_ENABLE_HIGHDPI_SCALING=0 QT_SCALE_FACTOR=1 QT_FONT_DPI=96 "$SCRIPT_DIR/.venv/bin/python" "$SCRIPT_DIR/APS GUI.py"
 Icon=$SCRIPT_DIR/ZE.png
 Terminal=false
 Categories=Science;Engineering;

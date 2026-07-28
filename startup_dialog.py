@@ -31,24 +31,6 @@ import pyvisa
 from pymeasure.experiment import Procedure
 
 log = logging.getLogger(__name__)
-SETTINGS_FILE = Path(__file__).resolve().with_name('settings.toml')
-DEFAULT_SETTINGS_FILE = Path(__file__).resolve().with_name('settings_defaults.toml')
-
-
-def load_settings():
-    """Load local settings, creating them from repository defaults on first launch."""
-    if SETTINGS_FILE.exists():
-        settings_path = SETTINGS_FILE
-    elif DEFAULT_SETTINGS_FILE.exists():
-        with open(DEFAULT_SETTINGS_FILE, 'r', encoding='utf-8') as settings_file:
-            settings = toml.load(settings_file) or {}
-        with open(SETTINGS_FILE, 'w', encoding='utf-8') as settings_file:
-            toml.dump(settings, settings_file)
-        return settings
-    else:
-        return {}
-    with open(settings_path, 'r', encoding='utf-8') as settings_file:
-        return toml.load(settings_file) or {}
 
 
 def discover_procedures():
@@ -1592,9 +1574,13 @@ class StartupDialog(QDialog):
 
     def _load_saved_settings(self):
         """Load saved settings from previous session."""
-        # Restore local settings, or repository defaults on first launch.
+        # Try to load settings.toml and restore GUI state (last procedure and saved VISA resource)
         try:
-            settings = load_settings()
+            settings_path = Path(__file__).parent / 'settings.toml'
+            if not settings_path.exists():
+                return
+            with open(settings_path, 'r', encoding='utf-8') as f:
+                settings = toml.load(f) or {}
 
             gui_settings = settings.get('gui', {}) if isinstance(settings, dict) else {}
 
@@ -1672,13 +1658,16 @@ class StartupDialog(QDialog):
                 f"connections={list(config['connection_parameters'].keys())}, "
                 f"device_ids captured: {list(config['device_ids'].keys())}")
 
-        # Persist the last selected procedure to local settings so it can be restored.
+        # Persist the last selected procedure to settings.toml so it can be restored
         try:
-            settings_path = SETTINGS_FILE
-            try:
-                settings = load_settings()
-            except Exception:
-                settings = {}
+            settings_path = Path(__file__).parent / 'settings.toml'
+            settings = {}
+            if settings_path.exists():
+                try:
+                    with open(settings_path, 'r', encoding='utf-8') as f:
+                        settings = toml.load(f) or {}
+                except Exception:
+                    settings = {}
             if 'gui' not in settings or not isinstance(settings['gui'], dict):
                 settings['gui'] = {}
             # Save the class name of the selected procedure (e.g. RandomProcedure)

@@ -16,6 +16,7 @@ from pathlib import Path
 os.environ['QT_AUTO_SCREEN_SCALE_FACTOR'] = '0'
 os.environ['QT_ENABLE_HIGHDPI_SCALING'] = '0'
 os.environ['QT_SCALE_FACTOR'] = os.environ.get('APS_QT_SCALE_FACTOR', '1')
+os.environ['QT_FONT_DPI'] = '96'
 
 from pymeasure.display.Qt import QtWidgets, QtCore
 from pymeasure.display.windows.managed_dock_window import ManagedDockWindow
@@ -28,8 +29,6 @@ from procedures.random import RandomProcedure
 
 log = logging.getLogger(__name__)
 APPLICATION_ICON = Path(__file__).resolve().with_name('ZE.png')
-SETTINGS_FILE = Path(__file__).resolve().with_name('settings.toml')
-DEFAULT_SETTINGS_FILE = Path(__file__).resolve().with_name('settings_defaults.toml')
 # Ensure logs directory exists and configure file-based logging when possible.
 logs_dir = Path('./logs')
 log_filename = logs_dir / f"{datetime.now():%Y-%m-%d_%H-%M-%S}.log"
@@ -51,9 +50,8 @@ except Exception:
 class SettingsManager:
     """TOML-based settings manager for persistent application configuration."""
     
-    def __init__(self, settings_file=SETTINGS_FILE, defaults_file=DEFAULT_SETTINGS_FILE):
+    def __init__(self, settings_file='settings.toml'):
         self.settings_file = Path(settings_file)
-        self.defaults_file = Path(defaults_file)
         self._settings = {}
         self._load_settings()
     
@@ -63,10 +61,6 @@ class SettingsManager:
             if self.settings_file.exists():
                 with open(self.settings_file, 'r', encoding='utf-8') as f:
                     self._settings = toml.load(f)
-            elif self.defaults_file.exists():
-                with open(self.defaults_file, 'r', encoding='utf-8') as f:
-                    self._settings = toml.load(f)
-                self._save_settings()
             else:
                 # Create default settings structure
                 self._settings = {
@@ -1037,6 +1031,7 @@ class MainWindow(ManagedDockWindow):
 
 if __name__ == "__main__":
     QtCore.QCoreApplication.setAttribute(QtCore.Qt.AA_DisableHighDpiScaling)
+    QtCore.QCoreApplication.setAttribute(QtCore.Qt.AA_Use96Dpi)
     app = QtWidgets.QApplication(sys.argv)
     app.setDesktopFileName('ze-aps-gui')
     app.setWindowIcon(QIcon(str(APPLICATION_ICON)))
