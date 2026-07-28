@@ -748,11 +748,11 @@ class GateStressTest(Procedure):
     # dropdown in the 'New Experiment' dialog.  Choices are populated by
     # update_device_choices() before the main window opens.
 
-    smu_serial = ListParameter('SMU', choices=[''])
+    smu_serial = ListParameter('SMU SN', choices=[''])
 
     # ---- GSS controller ---------------------------------------------------
 
-    gss_serial = ListParameter('GSS Controller', choices=[''])
+    gss_serial = ListParameter('GSS Controller SN', choices=[''])
 
     num_duts = IntegerParameter(
         'DUT Count', default=1, minimum=1, maximum=8,
@@ -804,12 +804,12 @@ class GateStressTest(Procedure):
 
     # ---- PSU --------------------------------------------------------------
 
-    psu_serial = ListParameter('PSU', choices=[''])
-    psu_ch_pos = IntegerParameter(
-        'PSU Channel V_on', default=1, minimum=1, maximum=3,
-    )
+    psu_serial = ListParameter('PSU SN', choices=[''])
     psu_ch_neg = IntegerParameter(
         'PSU Channel V_off', default=2, minimum=1, maximum=3,
+    )
+    psu_ch_pos = IntegerParameter(
+        'PSU Channel V_on', default=1, minimum=1, maximum=3,
     )
     v_gate_on = FloatParameter(
         'V_on (Gate On)', units='V',

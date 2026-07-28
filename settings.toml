@@ -34,12 +34,12 @@ aux_psu_ch3 = "15.0, 0.1"
 timeout = 300.0
 
 [parameters.Gate_Switching_Stress]
-gss_serial = "01"
+gss_serial = "03"
 num_duts = 1
 freq_hz = 1000000.0
 duty_cycle = 0.5
 smu_serial = ""
-vth_method = "force_current"
+vth_method = "ramp_voltage"
 vth_current_ma = 1.0
 vth_precond_voltage = 0.0
 vth_ramp_start_voltage = 6.0

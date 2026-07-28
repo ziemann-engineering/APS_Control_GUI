@@ -749,7 +749,7 @@ class GSSAllDeviceScanThread(QThread):
                     build_date = idn.get('build_date')
                     self.device_found.emit({'type': 'gss', 'serial': sn, 'version': ver,
                                            'build_date': build_date,
-                                           'port': port, 'display': f'{sn}  v{ver}  ({port})'})
+                                           'port': port, 'display': f'SN: {sn} Version {ver}  ({port})'})
                 elif dev_type == 'tcu':
                     # manufacturer,device,serial,version[ / build date]
                     details = data.split(',')
@@ -764,7 +764,7 @@ class GSSAllDeviceScanThread(QThread):
                         sn = 'N/A'
                         ver = 'N/A'
                     self.device_found.emit({'type': 'tcu', 'serial': sn, 'version': ver,
-                                           'port': port, 'display': f'{sn}  v{ver}  ({port})'})
+                                           'port': port, 'display': f'SN: {sn} Version {ver}  ({port})'})
             except Exception:
                 pass
 
