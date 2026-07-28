@@ -354,6 +354,7 @@ class GSSWorker:
                     cycles=batch_cycles,
                     freq_hz=self.cfg.freq_hz,
                     duty_cycle=self.cfg.duty_cycle,
+                    dut_channels=range(1, self.cfg.num_duts + 1),
                     should_stop=self._stop_requested,
                     on_progress=_report_progress,
                 )
@@ -384,6 +385,7 @@ class GSSWorker:
                         cycles=batch_cycles,
                         freq_hz=self.cfg.freq_hz,
                         duty_cycle=self.cfg.duty_cycle,
+                        dut_channels=range(1, self.cfg.num_duts + 1),
                         should_stop=self._stop_requested,
                         on_progress=_report_progress,
                     )
@@ -627,20 +629,27 @@ class GSSWorker:
             raise
 
     def _select_dut_for_measurement(self, dut: int):
-        """Route DUT *dut* to the SMU.  Silently skipped while TBD."""
-        try:
-            self.controller.select_dut(dut)
-            time.sleep(self._DUT_RELAY_SETTLE_S)
-        except NotImplementedError:
-            pass  # DUT MUX command is TBD
+        """Route DUT *dut* while holding exclusive ownership of the SMU path."""
+        with self.smu_lock:
+            try:
+                self.controller.select_dut(dut)
+                time.sleep(self._DUT_RELAY_SETTLE_S)
+            except NotImplementedError:
+                pass  # DUT MUX command is TBD
 
     def _measure_vth_all_duts(self):
-        """Measure Vth for every DUT, one at a time, via the shared SMU."""
+        """Measure all DUTs while exclusively owning the SMU and its routing."""
         vth_current = self.cfg.vth_current_ma * 1e-3
         compliance = self.cfg.vth_compliance_voltage
         method = self.cfg.vth_method
         precond_v = self.cfg.vth_precond_voltage
         threshold_i = vth_current
+
+        while not self._stop_requested():
+            if self.smu_lock.acquire(timeout=1.0):
+                break
+        else:
+            raise RuntimeError('Vth measurement interrupted while waiting for SMU')
 
         try:
             for dut in range(1, self.cfg.num_duts + 1):
@@ -648,54 +657,34 @@ class GSSWorker:
                     raise RuntimeError('Vth measurement interrupted by stop request')
                 self._select_dut_for_measurement(dut)
 
-                vth: Optional[float] = None
-                for attempt in range(1, 4):  # up to 3 attempts
-                    acquired = False
-                    deadline = time.time() + 30.0
-                    while time.time() < deadline and not self._stop_requested():
-                        acquired = self.smu_lock.acquire(timeout=1.0)
-                        if acquired:
-                            break
-                    if acquired:
-                        try:
-                            if method == 'ramp_voltage':
-                                vth = self.smu.measure_vth_ramp(
-                                    precondition_voltage_v=precond_v,
-                                    start_voltage_v=self.cfg.vth_ramp_start_voltage,
-                                    stop_voltage_v=self.cfg.vth_ramp_stop_voltage,
-                                    step_voltage_v=self.cfg.vth_ramp_step_voltage,
-                                    threshold_current_a=threshold_i,
-                                )
-                            else:
-                                self.smu.apply_precondition_voltage(
-                                    precond_voltage_v=precond_v,
-                                    duration_s=0.1,
-                                )
-                                vth = self.smu.measure_vth(
-                                    force_current_a=vth_current,
-                                    compliance_voltage_v=compliance,
-                                )
-                        finally:
-                            self.smu_lock.release()
-                        break
-                    else:
-                        if self._stop_requested():
-                            raise RuntimeError('Vth measurement interrupted by stop request')
-                        log.warning(
-                            f'[{self.cfg.id}] DUT {dut}: SMU busy, '
-                            f'retry {attempt}/3 in 30 s'
-                        )
-                        if self._sleep_interruptible(30.0):
-                            raise RuntimeError('Vth measurement interrupted by stop request')
-
-                if vth is not None:
-                    self.last_vth[dut] = vth
-                    log.info(f'[{self.cfg.id}] DUT {dut} Vth = {vth:.4f} V')
+                if method == 'ramp_voltage':
+                    vth = self.smu.measure_vth_ramp(
+                        precondition_voltage_v=precond_v,
+                        start_voltage_v=self.cfg.vth_ramp_start_voltage,
+                        stop_voltage_v=self.cfg.vth_ramp_stop_voltage,
+                        step_voltage_v=self.cfg.vth_ramp_step_voltage,
+                        threshold_current_a=threshold_i,
+                    )
                 else:
+                    self.smu.apply_precondition_voltage(
+                        precond_voltage_v=precond_v,
+                        duration_s=0.1,
+                    )
+                    vth = self.smu.measure_vth(
+                        force_current_a=vth_current,
+                        compliance_voltage_v=compliance,
+                    )
+
+                if vth is None:
                     log.warning(f'[{self.cfg.id}] DUT {dut} Vth measurement failed')
                     raise RuntimeError(f'DUT {dut} Vth measurement failed')
+                self.last_vth[dut] = vth
+                log.info(f'[{self.cfg.id}] DUT {dut} Vth = {vth:.4f} V')
         finally:
-            self._select_dut_for_measurement(0)
+            try:
+                self._select_dut_for_measurement(0)
+            finally:
+                self.smu_lock.release()
 
     # ------------------------------------------------------------------
     # Result emission
@@ -1051,8 +1040,9 @@ class GateStressTest(Procedure):
         gss_port = gss_info.get('port', self.gss_serial)
         psu_resource = psu_info.get('resource', self.psu_serial)
         tcu_port = tcu_info.get('port', self.tcu_serial)
+        controller_id = self.gss_serial or gss_port
         self._configs = [ControllerConfig(
-            id='Ctrl1',
+            id=controller_id,
             port=gss_port,
             gss_serial=self.gss_serial,
             num_duts=self.num_duts,
@@ -1084,7 +1074,7 @@ class GateStressTest(Procedure):
 
         # Connect shared SMU — resolve serial number → VISA resource
         self._smu = None
-        self._smu_lock = threading.Lock()
+        self._smu_lock = threading.RLock()
         _smu_info = _DEVICE_REGISTRY.get(self.smu_serial, {})
         _smu_resource = _smu_info.get('resource', self.smu_serial)
         if _smu_resource:

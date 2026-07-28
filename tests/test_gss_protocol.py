@@ -55,6 +55,22 @@ def test_batch_completion_uses_async_test_complete_message():
     assert controller.run_batch(1_000, 1, 0.5) == 123
 
 
+def test_batch_command_contains_only_selected_duts():
+    controller = GSSController('/dev/null')
+    commands = []
+
+    def send_command(command, timeout=None):
+        commands.append(command)
+        return 'CYCLES 123\nGSS_CTRL>'
+
+    controller._send_command = send_command
+
+    assert controller.run_batch(
+        1_000, 20_000, 0.5, dut_channels=[1, 2, 3, 4]
+    ) == 123
+    assert commands == ['GSS_test 1000 20000 0.5 1,2,3,4']
+
+
 def test_cycle_count_does_not_match_batch_configuration():
     assert GSSController._extract_cycle_count(
         'GSS starting: cycles=1000, configured_frequency=1000.0 Hz'

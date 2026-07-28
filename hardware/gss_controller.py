@@ -5,7 +5,7 @@ Interfaces with the GSS (Gate Switching Stress) control board via serial
 communication.  Uses the same shell-prompt protocol as the APS controller.
 
 Firmware protocol:
-    GSS_test <cycles> <freq_hz> <duty>  — starts one batch, returns "OK_STARTED"
+    GSS_test <cycles> <freq_hz> <duty> <dut_csv> — starts one selected-DUT batch
   GSS_cycles                          — returns "CYCLES <total>"
   measure_supply                      — returns "POS:+x.xx NEG:y.yy"
   measure_DUT <0-8>                   — returns "OK" (0 = deselect all)
@@ -24,7 +24,7 @@ import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Callable, Optional, Tuple
+from typing import Callable, Optional, Sequence, Tuple
 
 
 import datetime
@@ -397,7 +397,8 @@ class GSSController:
                   extra_timeout_s: float = 10.0,
                   poll_interval_s: float = 0.5,
                   should_stop: Optional[Callable[[], bool]] = None,
-                  on_progress: Optional[Callable[[int], None]] = None) -> Optional[int]:
+                  on_progress: Optional[Callable[[int], None]] = None,
+                  dut_channels: Optional[Sequence[int]] = None) -> Optional[int]:
         """Run one batch of *cycles* switching cycles and block until done.
 
         Parameters
@@ -408,6 +409,9 @@ class GSSController:
             Switching frequency in Hz.
         duty_cycle:
             Duty cycle, 0.0 – 1.0 (exclusive).
+        dut_channels:
+            One-based DUT channels to switch. When supplied, they are appended
+            as a comma-separated firmware argument, for example ``1,2,3,4``.
         extra_timeout_s:
             Additional seconds added to the expected batch duration as serial
             timeout margin.  Default 10 s.
@@ -443,9 +447,20 @@ class GSSController:
             raise ValueError('freq_hz must be > 0')
         if not (0.0 < duty_cycle < 1.0):
             raise ValueError('duty_cycle must be in (0, 1)')
+        if dut_channels is not None:
+            dut_channels = list(dut_channels)
+            if not dut_channels:
+                raise ValueError('dut_channels must not be empty')
+            if len(set(dut_channels)) != len(dut_channels):
+                raise ValueError('dut_channels must not contain duplicates')
+            if any(not isinstance(channel, int) or not 1 <= channel <= 8
+                   for channel in dut_channels):
+                raise ValueError('dut_channels must contain integers from 1 to 8')
 
         batch_duration_s = cycles / freq_hz
         cmd = f'GSS_test {cycles} {freq_hz:.6g} {duty_cycle:.6g}'
+        if dut_channels is not None:
+            cmd += ' ' + ','.join(str(channel) for channel in dut_channels)
         response = self._send_command(cmd, timeout=max(self.timeout, 2.0))
         if response is None:
             return None
