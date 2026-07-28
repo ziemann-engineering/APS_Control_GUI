@@ -91,11 +91,11 @@ if [ "$MODE" = 'setup' ]; then
     fi
   else
     echo 'Git repository found - pulling latest changes...'
-    git pull --ff-only
+    git pull --ff-only origin main
   fi
 elif [ "$HAS_GIT_CHECKOUT" = true ]; then
   echo 'Git repository found - pulling latest changes...'
-  git pull --ff-only
+  git pull --ff-only origin main
 fi
 
 # ---------------------------------------------------------------------------
@@ -131,7 +131,32 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 
 # ---------------------------------------------------------------------------
-# 6. Smoke-test key imports. If any fail, check if system packages are accessible in the virtual environment.
+# 6. Install a per-user desktop launcher so the Linux panel can identify the app
+# ---------------------------------------------------------------------------
+INSTALL_USER=${SUDO_USER:-$USER}
+INSTALL_HOME=$(getent passwd "$INSTALL_USER" | cut -d: -f6)
+if [ -n "$INSTALL_HOME" ] && [ -d "$INSTALL_HOME" ]; then
+  APPLICATIONS_DIR="$INSTALL_HOME/.local/share/applications"
+  mkdir -p "$APPLICATIONS_DIR"
+  cat > "$APPLICATIONS_DIR/ze-aps-gui.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=ZE APS Measurement GUI
+Comment=ZE automated power semiconductor measurement system
+Exec=env QT_AUTO_SCREEN_SCALE_FACTOR=0 QT_ENABLE_HIGHDPI_SCALING=0 QT_SCALE_FACTOR=1 "$SCRIPT_DIR/.venv/bin/python" "$SCRIPT_DIR/APS GUI.py"
+Icon=$SCRIPT_DIR/ZE.png
+Terminal=false
+Categories=Science;Engineering;
+StartupWMClass=ze-aps-gui
+EOF
+  chmod 0644 "$APPLICATIONS_DIR/ze-aps-gui.desktop"
+  echo "Desktop launcher installed for $INSTALL_USER."
+else
+  echo "WARNING: Could not determine a home directory for $INSTALL_USER; desktop launcher was not installed."
+fi
+
+# ---------------------------------------------------------------------------
+# 7. Smoke-test key imports. If any fail, check if system packages are accessible in the virtual environment.
 # ---------------------------------------------------------------------------
 echo 'Verifying key packages...'
 python -c 'import PyQt5; import pyqtgraph; import pymeasure; import pyvisa'

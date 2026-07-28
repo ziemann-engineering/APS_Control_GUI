@@ -13,6 +13,8 @@ import toml
 from pathlib import Path
 
 # Keep Qt's scale independent of the desktop account's inherited Qt settings.
+os.environ['QT_AUTO_SCREEN_SCALE_FACTOR'] = '0'
+os.environ['QT_ENABLE_HIGHDPI_SCALING'] = '0'
 os.environ['QT_SCALE_FACTOR'] = os.environ.get('APS_QT_SCALE_FACTOR', '1')
 
 from pymeasure.display.Qt import QtWidgets, QtCore
@@ -1027,7 +1029,9 @@ class MainWindow(ManagedDockWindow):
 
 
 if __name__ == "__main__":
+    QtCore.QCoreApplication.setAttribute(QtCore.Qt.AA_DisableHighDpiScaling)
     app = QtWidgets.QApplication(sys.argv)
+    app.setDesktopFileName('ze-aps-gui')
     app.setWindowIcon(QIcon(str(APPLICATION_ICON)))
     
     # Show startup dialog first

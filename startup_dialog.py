@@ -1135,6 +1135,42 @@ class GSSHardwareScanWidget(QGroupBox):
     def get_discovered_devices(self) -> list:
         return list(self._devices)
 
+    def apply_saved_connections(self, saved_map: dict):
+        """Restore the last selected device for each GSS hardware row."""
+        device_keys = {
+            'gss': ('gss_controller', 'port'),
+            'tcu': ('tcu', 'port'),
+            'nge103': ('nge103_psu', 'resource'),
+            'hmc8043': ('hmc8043_psu', 'resource'),
+            'keithley': ('keithley_smu', 'resource'),
+        }
+        self._devices.clear()
+        for dev_type, (connection_key, address_key) in device_keys.items():
+            saved = saved_map.get(connection_key, {})
+            serial = saved.get('serial', '') if isinstance(saved, dict) else ''
+            address = saved.get('connection', '') if isinstance(saved, dict) else ''
+            if not serial and not address:
+                continue
+
+            info = {
+                'type': dev_type,
+                'serial': serial,
+                address_key: address,
+                'display': serial or address,
+            }
+            self._devices.append(info)
+            combo = self._combos[dev_type]
+            combo.clear()
+            combo.addItem(info['display'], info)
+            combo.setEnabled(True)
+            self._count_lbls[dev_type].setText('1 saved')
+            self._test_btns[dev_type].setEnabled(True)
+
+        if self._devices:
+            self._progress_lbl.setText(
+                'Restored last used hardware. Scan All Devices to rescan.'
+            )
+
     def get_connection_parameters(self) -> dict:
         """Return a dict compatible with HardwareConfigWidget output."""
         result = {}
@@ -1343,6 +1379,12 @@ class StartupDialog(QDialog):
             self.hardware_widget = None
             self.gss_scan_widget = GSSHardwareScanWidget()
             self.main_layout.insertWidget(self.hardware_widget_index, self.gss_scan_widget)
+            try:
+                saved_for_proc = self.saved_connections.get(procedure_class.__name__, {})
+                if saved_for_proc:
+                    self.gss_scan_widget.apply_saved_connections(saved_for_proc)
+            except Exception:
+                log.debug('Failed to apply saved GSS connections', exc_info=True)
             log.debug('GSS hardware scan widget added')
         else:
             log.debug(f'Creating hardware configuration widget for {procedure_class.__name__}')
@@ -1563,6 +1605,15 @@ class StartupDialog(QDialog):
                         log.info(f"Restored last selected procedure: {last}")
                         break
 
+            current_procedure = self.procedure_combo.currentData()
+            if (getattr(current_procedure, 'internal_name', '') ==
+                    'Gate_Switching_Stress' and self.gss_scan_widget is not None):
+                saved_for_proc = self.saved_connections.get(
+                    current_procedure.__name__, {}
+                )
+                if saved_for_proc:
+                    self.gss_scan_widget.apply_saved_connections(saved_for_proc)
+
         except Exception:
             log.debug('Failed to load saved settings', exc_info=True)
     
@@ -1642,8 +1693,14 @@ class StartupDialog(QDialog):
                             except Exception:
                                 enabled_map[dev_type] = True
                         settings['gui']['enabled'][proc_name] = enabled_map
-                    # (gss_scan_widget has no persistent config to save beyond the TOML)
-                    pass
+                elif self.gss_scan_widget:
+                    proc_name = getattr(self.selected_procedure, '__name__', None)
+                    if proc_name:
+                        if 'connections' not in settings['gui'] or not isinstance(settings['gui']['connections'], dict):
+                            settings['gui']['connections'] = {}
+                        settings['gui']['connections'][proc_name] = (
+                            self.gss_scan_widget.get_connection_parameters()
+                        )
             except Exception:
                 log.debug('Failed to save per-device connections or enabled states', exc_info=True)
             with open(settings_path, 'w', encoding='utf-8') as f:
