@@ -702,6 +702,9 @@ class GSSAllDeviceScanThread(QThread):
 
     _BAUDRATE = 38400
     _ID_CMD = b'*IDN?\r\n'
+    _SERIAL_PROBE_ATTEMPTS = 1
+    _SERIAL_PROBE_TIMEOUT_S = 0.3
+    _VISA_PROBE_TIMEOUT_MS = 750
 
     # List of known serial-port devices: (identifying substring in the *IDN?
     # reply, device type key).  The *IDN? response is compared against this
@@ -726,12 +729,25 @@ class GSSAllDeviceScanThread(QThread):
             self.progress.emit(f'Probing {port}…')
             try:
                 import serial as _serial
-                with _serial.Serial(port, self._BAUDRATE, timeout=0.5) as ser:
-                    ser.reset_input_buffer()
-                    ser.write(self._ID_CMD)
-                    time.sleep(0.3)
-                    data = ser.read(256).decode('ascii', errors='ignore')
-                    log.debug(f"Received from {port}: {data.strip()}")
+                data = ''
+                with _serial.Serial(port, self._BAUDRATE, timeout=0.05) as ser:
+                    for attempt in range(self._SERIAL_PROBE_ATTEMPTS):
+                        ser.reset_input_buffer()
+                        ser.write(self._ID_CMD)
+                        ser.flush()
+                        deadline = time.monotonic() + self._SERIAL_PROBE_TIMEOUT_S
+                        response = bytearray()
+                        while time.monotonic() < deadline:
+                            chunk = ser.read(256)
+                            if chunk:
+                                response.extend(chunk)
+                                if b'>' in response:
+                                    break
+                        data = response.decode('ascii', errors='ignore')
+                        if any(sig in data for sig, _ in self._KNOWN_SERIAL_DEVICES):
+                            break
+                        log.debug(f"No recognised response from {port} on probe {attempt + 1}")
+                log.debug(f"Received from {port}: {data.strip()}")
 
                 # Compare the response against the list of known devices.
                 dev_type = next(
@@ -780,7 +796,7 @@ class GSSAllDeviceScanThread(QThread):
             self.progress.emit(f'Querying {res}…')
             try:
                 with rm.open_resource(res) as inst:
-                    inst.timeout = 2000
+                    inst.timeout = self._VISA_PROBE_TIMEOUT_MS
                     idn = inst.query('*IDN?').strip()
                 idn_u = idn.upper()
                 parts = [p.strip() for p in idn.split(',')]
@@ -1120,29 +1136,67 @@ class GSSHardwareScanWidget(QGroupBox):
     def get_discovered_devices(self) -> list:
         return list(self._devices)
 
-    def get_connection_parameters(self) -> dict:
-        """Return a dict compatible with HardwareConfigWidget output."""
-        result = {}
+    def apply_saved_connections(self, saved_map: dict):
+        """Restore every saved dropdown option and its last selection."""
+        devices = saved_map.get('gss_discovered_devices', [])
+        selections = saved_map.get('gss_selected_devices', {})
+        if not isinstance(devices, list):
+            return
+
+        self._devices = [device for device in devices if isinstance(device, dict)]
         for dev_type, _ in self._ROWS:
             combo = self._combos[dev_type]
-            info = combo.currentData()
+            combo.clear()
+            matching_devices = [
+                device for device in self._devices if device.get('type') == dev_type
+            ]
+            if not matching_devices:
+                combo.addItem('(none saved)')
+                combo.setEnabled(False)
+                self._count_lbls[dev_type].setText('0 saved')
+                self._test_btns[dev_type].setEnabled(False)
+                continue
+
+            selected_serial = selections.get(dev_type, '')
+            selected_index = 0
+            for index, device in enumerate(matching_devices):
+                combo.addItem(
+                    device.get('display', device.get('serial', '?')), device
+                )
+                if device.get('serial') == selected_serial:
+                    selected_index = index
+            combo.setCurrentIndex(selected_index)
+            combo.setEnabled(True)
+            self._count_lbls[dev_type].setText(f'{len(matching_devices)} saved')
+            self._test_btns[dev_type].setEnabled(True)
+
+        if self._devices:
+            self._progress_lbl.setText(
+                'Restored last used hardware. Scan All Devices to rescan.'
+            )
+
+    def get_connection_parameters(self) -> dict:
+        """Return a dict compatible with HardwareConfigWidget output."""
+        result = {
+            'gss_discovered_devices': self.get_discovered_devices(),
+            'gss_selected_devices': {},
+        }
+        connection_keys = {
+            'gss': 'gss_controller',
+            'tcu': 'tcu',
+            'nge103': 'nge103_psu',
+            'hmc8043': 'hmc8043_psu',
+            'keithley': 'keithley_smu',
+        }
+        for dev_type, connection_key in connection_keys.items():
+            info = self._combos[dev_type].currentData()
             if not info:
                 continue
-            if dev_type == 'gss':
-                result['gss_controller'] = {'connection': info.get('port', ''),
-                                             'serial': info.get('serial', '')}
-            elif dev_type == 'tcu':
-                result['tcu'] = {'connection': info.get('port', ''),
-                                 'serial': info.get('serial', '')}
-            elif dev_type == 'nge103':
-                result['nge103_psu'] = {'connection': info.get('resource', ''),
-                                         'serial': info.get('serial', '')}
-            elif dev_type == 'hmc8043':
-                result['hmc8043_psu'] = {'connection': info.get('resource', ''),
-                                          'serial': info.get('serial', '')}
-            elif dev_type == 'keithley':
-                result['keithley_smu'] = {'connection': info.get('resource', ''),
-                                           'serial': info.get('serial', '')}
+            result['gss_selected_devices'][dev_type] = info.get('serial', '')
+            result[connection_key] = {
+                'connection': info.get('port', info.get('resource', '')),
+                'serial': info.get('serial', ''),
+            }
         return result
 
 
@@ -1328,6 +1382,12 @@ class StartupDialog(QDialog):
             self.hardware_widget = None
             self.gss_scan_widget = GSSHardwareScanWidget()
             self.main_layout.insertWidget(self.hardware_widget_index, self.gss_scan_widget)
+            try:
+                saved_for_proc = self.saved_connections.get(procedure_class.__name__, {})
+                if saved_for_proc:
+                    self.gss_scan_widget.apply_saved_connections(saved_for_proc)
+            except Exception:
+                log.debug('Failed to apply saved GSS connections', exc_info=True)
             log.debug('GSS hardware scan widget added')
         else:
             log.debug(f'Creating hardware configuration widget for {procedure_class.__name__}')
@@ -1548,6 +1608,15 @@ class StartupDialog(QDialog):
                         log.info(f"Restored last selected procedure: {last}")
                         break
 
+            current_procedure = self.procedure_combo.currentData()
+            if (getattr(current_procedure, 'internal_name', '') ==
+                    'Gate_Switching_Stress' and self.gss_scan_widget is not None):
+                saved_for_proc = self.saved_connections.get(
+                    current_procedure.__name__, {}
+                )
+                if saved_for_proc:
+                    self.gss_scan_widget.apply_saved_connections(saved_for_proc)
+
         except Exception:
             log.debug('Failed to load saved settings', exc_info=True)
     
@@ -1627,8 +1696,14 @@ class StartupDialog(QDialog):
                             except Exception:
                                 enabled_map[dev_type] = True
                         settings['gui']['enabled'][proc_name] = enabled_map
-                    # (gss_scan_widget has no persistent config to save beyond the TOML)
-                    pass
+                elif self.gss_scan_widget:
+                    proc_name = getattr(self.selected_procedure, '__name__', None)
+                    if proc_name:
+                        if 'connections' not in settings['gui'] or not isinstance(settings['gui']['connections'], dict):
+                            settings['gui']['connections'] = {}
+                        settings['gui']['connections'][proc_name] = (
+                            self.gss_scan_widget.get_connection_parameters()
+                        )
             except Exception:
                 log.debug('Failed to save per-device connections or enabled states', exc_info=True)
             with open(settings_path, 'w', encoding='utf-8') as f:

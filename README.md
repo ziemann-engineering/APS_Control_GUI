@@ -168,6 +168,7 @@ It is an OS-level tool, not a Python package, and must be available on `PATH`.
 To verify: `dfu-util --version`
 
 > **Note:** `dfu-util` is only needed if you use the *Flash GSS Firmware* feature in the startup dialog. The rest of the GUI works without it.
+> The `Invalid DFU suffix signature` warning is emitted by some firmware images and does not prevent a completed update. The controller may also reset before `dfu-util` receives its final status; the GUI reports this outcome as a completed transfer.
 
 ### 4.5 Deploy Scripts
 
@@ -176,7 +177,21 @@ Use these helpers to install the OS-specific prerequisites and then the Python p
 - Windows: `deploy_windows.ps1`
 - Linux / Pi OS: `deploy_pi_os.sh`
 
-The Linux script installs `dfu-util` and `python3-pyqt5` from the OS package manager, then installs the remaining Python dependencies into a local virtual environment.
+The Linux / Pi OS script has two modes:
+
+```bash
+# First install from a downloaded project folder (default mode)
+./deploy_pi_os.sh setup
+
+# Refresh an existing Git installation and its Python packages
+./deploy_pi_os.sh update
+```
+
+`setup` installs `dfu-util`, `python3-pyqt5`, libusb, and PyUSB support through the OS package manager, creates a local virtual environment, and installs the remaining Python dependencies. It also installs a udev rule that allows the logged-in user to access USB instruments with PyVISA/PyUSB; reconnect the USB instruments or reboot after the first setup. In a downloaded archive folder with no `.git` directory, setup initializes a Git checkout and replaces the downloaded project files with the current `main` revision when the repository is reachable; when offline, it continues with the downloaded files. `update` requires a Git checkout and performs no OS-level package or USB configuration changes.
+
+Both Linux deployment modes download the current GSS controller firmware from the `main` branch to `firmware/GSS_CONTROL.bin`. If the download fails, deployment continues and retains any existing local firmware file.
+
+The script also installs a **ZE APS Measurement GUI** launcher for the normal desktop user. Launch the application from that menu entry after deployment; it provides the Linux panel icon and the intended Qt display scaling.
 
 ### 4.6 Launch the Application
 

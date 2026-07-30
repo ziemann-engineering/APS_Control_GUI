@@ -167,6 +167,7 @@ class GSSWorker:
         psu=None,
         psu_lock: Optional[threading.Lock] = None,
         tcu=None,
+        tcu_lock: Optional[threading.Lock] = None,
         checkpoint_path: str = '',
     ):
         self.cfg = cfg
@@ -177,6 +178,7 @@ class GSSWorker:
         self.psu = psu
         self.psu_lock = psu_lock or threading.Lock()
         self.tcu = tcu
+        self.tcu_lock = tcu_lock or threading.Lock()
         self.checkpoint_path = checkpoint_path
 
         self.controller = None
@@ -290,7 +292,6 @@ class GSSWorker:
             planned_cycles = int(self.cfg.freq_hz * batch_duration_s)
             batch_cycles = max(1, min(remaining, planned_cycles, self._MAX_FIRMWARE_BATCH_CYCLES))
 
-            self._select_dut_for_measurement(0)
             self.status = 'switching'
             self.batch_number += 1
             log.info(
@@ -352,6 +353,7 @@ class GSSWorker:
                     cycles=batch_cycles,
                     freq_hz=self.cfg.freq_hz,
                     duty_cycle=self.cfg.duty_cycle,
+                    dut_channels=range(1, self.cfg.num_duts + 1),
                     should_stop=self._stop_requested,
                     on_progress=_report_progress,
                 )
@@ -382,6 +384,7 @@ class GSSWorker:
                         cycles=batch_cycles,
                         freq_hz=self.cfg.freq_hz,
                         duty_cycle=self.cfg.duty_cycle,
+                        dut_channels=range(1, self.cfg.num_duts + 1),
                         should_stop=self._stop_requested,
                         on_progress=_report_progress,
                     )
@@ -547,8 +550,9 @@ class GSSWorker:
         if self.tcu is None:
             return
         try:
-            self.tcu.set_temperature(self.cfg.tcu_channel, self.cfg.temperature_c)
-            self.tcu.enable_channel(self.cfg.tcu_channel)
+            with self.tcu_lock:
+                self.tcu.set_temperature(self.cfg.tcu_channel, self.cfg.temperature_c)
+                self.tcu.enable_channel(self.cfg.tcu_channel)
             log.info(
                 f'[{self.cfg.id}] TCU ch{self.cfg.tcu_channel} → '
                 f'{self.cfg.temperature_c} °C'
@@ -613,7 +617,8 @@ class GSSWorker:
         if self.tcu is None:
             return
         try:
-            t = self.tcu.get_temperature(self.cfg.tcu_channel)
+            with self.tcu_lock:
+                t = self.tcu.get_temperature(self.cfg.tcu_channel)
             if t is not None and not math.isnan(t):
                 self.last_temperature = t
             else:
@@ -623,20 +628,27 @@ class GSSWorker:
             raise
 
     def _select_dut_for_measurement(self, dut: int):
-        """Route DUT *dut* to the SMU.  Silently skipped while TBD."""
-        try:
-            self.controller.select_dut(dut)
-            time.sleep(self._DUT_RELAY_SETTLE_S)
-        except NotImplementedError:
-            pass  # DUT MUX command is TBD
+        """Route DUT *dut* while holding exclusive ownership of the SMU path."""
+        with self.smu_lock:
+            try:
+                self.controller.select_dut(dut)
+                time.sleep(self._DUT_RELAY_SETTLE_S)
+            except NotImplementedError:
+                pass  # DUT MUX command is TBD
 
     def _measure_vth_all_duts(self):
-        """Measure Vth for every DUT, one at a time, via the shared SMU."""
+        """Measure all DUTs while exclusively owning the SMU and its routing."""
         vth_current = self.cfg.vth_current_ma * 1e-3
         compliance = self.cfg.vth_compliance_voltage
         method = self.cfg.vth_method
         precond_v = self.cfg.vth_precond_voltage
         threshold_i = vth_current
+
+        while not self._stop_requested():
+            if self.smu_lock.acquire(timeout=1.0):
+                break
+        else:
+            raise RuntimeError('Vth measurement interrupted while waiting for SMU')
 
         try:
             for dut in range(1, self.cfg.num_duts + 1):
@@ -644,54 +656,34 @@ class GSSWorker:
                     raise RuntimeError('Vth measurement interrupted by stop request')
                 self._select_dut_for_measurement(dut)
 
-                vth: Optional[float] = None
-                for attempt in range(1, 4):  # up to 3 attempts
-                    acquired = False
-                    deadline = time.time() + 30.0
-                    while time.time() < deadline and not self._stop_requested():
-                        acquired = self.smu_lock.acquire(timeout=1.0)
-                        if acquired:
-                            break
-                    if acquired:
-                        try:
-                            if method == 'ramp_voltage':
-                                vth = self.smu.measure_vth_ramp(
-                                    precondition_voltage_v=precond_v,
-                                    start_voltage_v=self.cfg.vth_ramp_start_voltage,
-                                    stop_voltage_v=self.cfg.vth_ramp_stop_voltage,
-                                    step_voltage_v=self.cfg.vth_ramp_step_voltage,
-                                    threshold_current_a=threshold_i,
-                                )
-                            else:
-                                self.smu.apply_precondition_voltage(
-                                    precond_voltage_v=precond_v,
-                                    duration_s=0.1,
-                                )
-                                vth = self.smu.measure_vth(
-                                    force_current_a=vth_current,
-                                    compliance_voltage_v=compliance,
-                                )
-                        finally:
-                            self.smu_lock.release()
-                        break
-                    else:
-                        if self._stop_requested():
-                            raise RuntimeError('Vth measurement interrupted by stop request')
-                        log.warning(
-                            f'[{self.cfg.id}] DUT {dut}: SMU busy, '
-                            f'retry {attempt}/3 in 30 s'
-                        )
-                        if self._sleep_interruptible(30.0):
-                            raise RuntimeError('Vth measurement interrupted by stop request')
-
-                if vth is not None:
-                    self.last_vth[dut] = vth
-                    log.info(f'[{self.cfg.id}] DUT {dut} Vth = {vth:.4f} V')
+                if method == 'ramp_voltage':
+                    vth = self.smu.measure_vth_ramp(
+                        precondition_voltage_v=precond_v,
+                        start_voltage_v=self.cfg.vth_ramp_start_voltage,
+                        stop_voltage_v=self.cfg.vth_ramp_stop_voltage,
+                        step_voltage_v=self.cfg.vth_ramp_step_voltage,
+                        threshold_current_a=threshold_i,
+                    )
                 else:
+                    self.smu.apply_precondition_voltage(
+                        precond_voltage_v=precond_v,
+                        duration_s=0.1,
+                    )
+                    vth = self.smu.measure_vth(
+                        force_current_a=vth_current,
+                        compliance_voltage_v=compliance,
+                    )
+
+                if vth is None:
                     log.warning(f'[{self.cfg.id}] DUT {dut} Vth measurement failed')
                     raise RuntimeError(f'DUT {dut} Vth measurement failed')
+                self.last_vth[dut] = vth
+                log.info(f'[{self.cfg.id}] DUT {dut} Vth = {vth:.4f} V')
         finally:
-            self._select_dut_for_measurement(0)
+            try:
+                self._select_dut_for_measurement(0)
+            finally:
+                self.smu_lock.release()
 
     # ------------------------------------------------------------------
     # Result emission
@@ -1005,6 +997,8 @@ class GateStressTest(Procedure):
 
     def startup(self):
         """Parse configuration, connect all shared hardware."""
+        from hardware.shared_resources import shared_hardware
+
         self._workers: List[GSSWorker] = []
         self._result_queue: queue.Queue = queue.Queue()
         # Initialise pools early so shutdown() is always safe even if startup
@@ -1013,7 +1007,12 @@ class GateStressTest(Procedure):
         self._psu_pool: Dict[str, Any] = {}
         self._psu_locks: Dict[str, threading.Lock] = {}
         self._tcu_pool: Dict[str, Any] = {}
+        self._tcu_locks: Dict[str, threading.Lock] = {}
         self._smu = None
+        self._smu_lease = None
+        self._psu_leases = {}
+        self._tcu_leases = {}
+        self._gss_lease = None
 
         # The GUI (APS GUI.py) computes the exact path of pymeasure's own
         # Results CSV before queuing this procedure and stores it here, so
@@ -1031,18 +1030,19 @@ class GateStressTest(Procedure):
 
         self._apply_connection_parameters()
 
-        # Build the (single) controller config from the individual parameters.
-        # Resolve serial numbers → actual connection strings via device registry.
-        # Fallback: use the serial string directly (allows manual entry).
-        _gss_info = _DEVICE_REGISTRY.get(self.gss_serial, {})
-        _psu_info = _DEVICE_REGISTRY.get(self.psu_serial, {})
-        _tcu_info = _DEVICE_REGISTRY.get(self.tcu_serial, {})
-        _gss_port    = _gss_info.get('port',     self.gss_serial)
-        _psu_res     = _psu_info.get('resource', self.psu_serial)
-        _tcu_port    = _tcu_info.get('port',     self.tcu_serial)
+        # Build the controller config from the individual parameters. Resolve
+        # serial numbers to actual connection strings via the device registry.
+        # Fall back to the serial string directly to allow manual entry.
+        gss_info = _DEVICE_REGISTRY.get(self.gss_serial, {})
+        psu_info = _DEVICE_REGISTRY.get(self.psu_serial, {})
+        tcu_info = _DEVICE_REGISTRY.get(self.tcu_serial, {})
+        gss_port = gss_info.get('port', self.gss_serial)
+        psu_resource = psu_info.get('resource', self.psu_serial)
+        tcu_port = tcu_info.get('port', self.tcu_serial)
+        controller_id = self.gss_serial or gss_port
         self._configs = [ControllerConfig(
-            id='Ctrl1',
-            port=_gss_port,
+            id=controller_id,
+            port=gss_port,
             gss_serial=self.gss_serial,
             num_duts=self.num_duts,
             freq_hz=self.freq_hz,
@@ -1055,50 +1055,81 @@ class GateStressTest(Procedure):
             vth_ramp_step_voltage=self.vth_ramp_step_voltage,
             vth_threshold_current=self.vth_current_ma * 1e-3,
             vth_compliance_voltage=self.vth_compliance_voltage,
-            psu_resource=_psu_res,
+            psu_resource=psu_resource,
             psu_serial=self.psu_serial,
             psu_ch_pos=self.psu_ch_pos,
             psu_ch_neg=self.psu_ch_neg,
             v_gate_on=self.v_gate_on,
             v_gate_off=self.v_gate_off,
-            tcu_port=_tcu_port,
+            tcu_port=tcu_port,
             tcu_serial=self.tcu_serial,
             tcu_channel=self.tcu_channel,
             temperature_c=self.temperature_c,
         )]
 
+        if not gss_port:
+            raise ValueError('A GSS controller must be selected')
+        self._gss_lease = shared_hardware.claim_exclusive('gss', gss_port)
+
         # Connect shared SMU — resolve serial number → VISA resource
         self._smu = None
-        self._smu_lock = threading.Lock()
+        self._smu_lock = threading.RLock()
         _smu_info = _DEVICE_REGISTRY.get(self.smu_serial, {})
         _smu_resource = _smu_info.get('resource', self.smu_serial)
         if _smu_resource:
             from hardware.keithley_2636 import KeithleySMU
-            smu = KeithleySMU(_smu_resource)
-            if smu.connect():
-                self._smu = smu
-                log.info(f'SMU connected: {smu.idn}')
+            def _connect_smu():
+                smu = KeithleySMU(_smu_resource)
+                return smu if smu.connect() else None
+
+            self._smu_lease = shared_hardware.acquire('smu', _smu_resource, _connect_smu)
+            if self._smu_lease is not None:
+                self._smu = self._smu_lease.device
+                self._smu_lock = self._smu_lease.lock
+                log.info(f'SMU available: {self._smu.idn}')
             else:
-                log.error('Failed to connect to SMU; Vth measurement disabled')
+                raise RuntimeError(f'Failed to connect to requested SMU {_smu_resource}')
 
         # Connect shared PSUs (one object per unique resource string)
         self._psu_pool: Dict[str, Any] = {}         # resource → driver
         self._psu_locks: Dict[str, threading.Lock] = {}  # resource → lock
         for cfg in self._configs:
             if cfg.psu_resource and cfg.psu_resource not in self._psu_pool:
-                psu = self._connect_psu(cfg.psu_resource)
-                self._psu_pool[cfg.psu_resource] = psu  # may be None on failure
-                self._psu_locks[cfg.psu_resource] = threading.Lock()
+                resource = cfg.psu_resource
+                lease = shared_hardware.acquire(
+                    'psu', resource, lambda resource=resource: self._connect_psu(resource)
+                )
+                self._psu_leases[resource] = lease
+                self._psu_pool[resource] = lease.device if lease else None
+                self._psu_locks[resource] = lease.lock if lease else threading.Lock()
+                if lease is None:
+                    raise RuntimeError(f'Failed to connect to requested PSU {resource}')
 
         # Connect shared TCUs (one object per unique port)
         self._tcu_pool: Dict[str, Any] = {}         # port → driver
         for cfg in self._configs:
             if cfg.tcu_port and cfg.tcu_port not in self._tcu_pool:
-                tcu = self._connect_tcu(cfg.tcu_port)
-                self._tcu_pool[cfg.tcu_port] = tcu  # may be None on failure
+                port = cfg.tcu_port
+                lease = shared_hardware.acquire(
+                    'tcu', port, lambda port=port: self._connect_tcu(port)
+                )
+                self._tcu_leases[port] = lease
+                self._tcu_pool[port] = lease.device if lease else None
+                self._tcu_locks[port] = lease.lock if lease else threading.Lock()
+                if lease is None:
+                    raise RuntimeError(f'Failed to connect to requested TCU {port}')
 
         # Check for conflicting PSU/TCU channel assignments
         self._check_psu_tcu_conflicts(self._configs)
+
+        for cfg in self._configs:
+            psu_lease = self._psu_leases.get(cfg.psu_resource)
+            if psu_lease is not None:
+                psu_lease.reserve_channel(cfg.psu_ch_pos, abs(cfg.v_gate_on), 0.01)
+                psu_lease.reserve_channel(cfg.psu_ch_neg, abs(cfg.v_gate_off), 0.01)
+            tcu_lease = self._tcu_leases.get(cfg.tcu_port)
+            if tcu_lease is not None:
+                tcu_lease.reserve_channel(cfg.tcu_channel, cfg.temperature_c, 0.5)
 
         # Set PSU voltages / TCU temperatures and verify before switching starts
         self._verify_hardware_setup()
@@ -1108,6 +1139,7 @@ class GateStressTest(Procedure):
             psu = self._psu_pool.get(cfg.psu_resource)
             psu_lock = self._psu_locks.get(cfg.psu_resource, threading.Lock())
             tcu = self._tcu_pool.get(cfg.tcu_port)
+            tcu_lock = self._tcu_locks.get(cfg.tcu_port, threading.Lock())
             worker = GSSWorker(
                 cfg=cfg,
                 procedure=self,
@@ -1117,6 +1149,7 @@ class GateStressTest(Procedure):
                 psu=psu,
                 psu_lock=psu_lock,
                 tcu=tcu,
+                tcu_lock=tcu_lock,
                 checkpoint_path=self._checkpoint_path,
             )
             self._workers.append(worker)
@@ -1186,76 +1219,62 @@ class GateStressTest(Procedure):
         for worker in self._workers:
             worker.stop(timeout=self.worker_shutdown_timeout_s)
 
-        # Disable all PSU outputs
-        for resource, psu in self._psu_pool.items():
-            if psu is None:
+        # Release PSU channels. Disable only when the final owner exits.
+        for resource, lease in self._psu_leases.items():
+            if lease is None:
                 continue
-            psu_lock = self._psu_locks.get(resource, threading.Lock())
+            psu = lease.device
             configured_channels = sorted({
                 ch
                 for cfg in self._configs
                 if cfg.psu_resource == resource
                 for ch in (cfg.psu_ch_pos, cfg.psu_ch_neg)
             })
-            if not configured_channels and hasattr(psu, 'num_channels'):
-                try:
-                    configured_channels = list(range(1, int(psu.num_channels) + 1))
-                    log.warning(
-                        f'PSU {resource}: no configured channel map found; '
-                        f'falling back to disabling all {len(configured_channels)} channel(s)'
-                    )
-                except (TypeError, ValueError):
-                    log.warning(
-                        f'PSU {resource}: unable to derive channel count from num_channels; '
-                        'shutdown will target only explicitly configured channels'
-                    )
             try:
-                with psu_lock:
-                    if hasattr(psu, 'enable_master_output'):
-                        try:
-                            psu.enable_master_output(False)
-                        except Exception as exc:
-                            log.warning(f'PSU {resource} master output disable failed: {exc}')
-                    if hasattr(psu, 'emergency_stop'):
-                        try:
-                            psu.emergency_stop()
-                        except Exception as exc:
-                            log.warning(f'PSU {resource} emergency stop failed: {exc}')
-                    if not configured_channels:
-                        log.warning(
-                            f'PSU {resource}: no target channels available for explicit '
-                            'disable; proceeding with disconnect only'
+                for ch in configured_channels:
+                    try:
+                        lease.release_channel(
+                            ch,
+                            on_final=lambda ch=ch: psu.enable_output(ch, False),
                         )
-                    for ch in configured_channels:
-                        try:
-                            psu.enable_output(ch, False)
-                        except Exception as exc:
-                            log.warning(f'PSU {resource} ch{ch} disable failed: {exc}')
-                    psu.disconnect()
-                    log.info(f'PSU {resource} outputs disabled and disconnected')
+                    except Exception as exc:
+                        log.warning(f'PSU {resource} ch{ch} disable failed: {exc}')
+                lease.close()
+                log.info(f'PSU {resource} lease released')
             except Exception as exc:
                 log.warning(f'PSU shutdown error ({resource}): {exc}')
 
-        # Disable all TCU channels
-        for port, tcu in self._tcu_pool.items():
-            if tcu is None:
+        # Release TCU channels with the same final-owner rule.
+        for port, lease in self._tcu_leases.items():
+            if lease is None:
                 continue
             try:
-                for cfg in self._configs:
-                    if cfg.tcu_port == port:
-                        tcu.disable_channel(cfg.tcu_channel)
-                tcu.disconnect()
-                log.info(f'TCU {port} channels disabled and disconnected')
+                channels = sorted({
+                    cfg.tcu_channel for cfg in self._configs if cfg.tcu_port == port
+                })
+                for channel in channels:
+                    lease.release_channel(
+                        channel,
+                        on_final=lambda channel=channel: lease.device.disable_channel(channel),
+                    )
+                lease.close()
+                log.info(f'TCU {port} lease released')
             except Exception as exc:
                 log.warning(f'TCU shutdown error ({port}): {exc}')
 
-        # Disconnect SMU
-        if self._smu is not None:
+        # Release the shared SMU connection after any in-flight measurement.
+        if self._smu_lease is not None:
             try:
-                self._smu.disconnect()
-                log.info('SMU disconnected')
+                with self._smu_lease.lock:
+                    pass
+                self._smu_lease.close()
+                log.info('SMU lease released')
             except Exception as exc:
-                log.warning(f'SMU disconnect error: {exc}')
+                log.warning(f'SMU release error: {exc}')
+
+        if self._gss_lease is not None:
+            self._gss_lease.close()
+            log.info('GSS controller lease released')
 
         # Final sync: mirror the Results file (and checkpoint) to the NAS
         self._sync_to_nas(final=True)
@@ -1349,8 +1368,10 @@ class GateStressTest(Procedure):
                 continue
             key = (cfg.tcu_port, cfg.tcu_channel)
             if key not in tcu_done:
-                tcu.set_temperature(cfg.tcu_channel, cfg.temperature_c)
-                tcu.enable_channel(cfg.tcu_channel)
+                lock = self._tcu_locks.get(cfg.tcu_port, threading.Lock())
+                with lock:
+                    tcu.set_temperature(cfg.tcu_channel, cfg.temperature_c)
+                    tcu.enable_channel(cfg.tcu_channel)
                 tcu_done.add(key)
                 wait = max(0.0, (cfg.temperature_c - 25.0) / 25.0) * 2.0
                 tcu_wait_minutes = max(tcu_wait_minutes, wait)
@@ -1421,7 +1442,9 @@ class GateStressTest(Procedure):
                     tcu = self._tcu_pool.get(cfg.tcu_port)
                     if tcu is None:
                         continue
-                    actual_t = tcu.get_temperature(cfg.tcu_channel)
+                    lock = self._tcu_locks.get(cfg.tcu_port, threading.Lock())
+                    with lock:
+                        actual_t = tcu.get_temperature(cfg.tcu_channel)
                     if actual_t is None or math.isnan(float(actual_t)):
                         all_settled = False
                         continue
@@ -1450,7 +1473,9 @@ class GateStressTest(Procedure):
                     tcu = self._tcu_pool.get(cfg.tcu_port)
                     if tcu is None:
                         continue
-                    actual_t = tcu.get_temperature(cfg.tcu_channel)
+                    lock = self._tcu_locks.get(cfg.tcu_port, threading.Lock())
+                    with lock:
+                        actual_t = tcu.get_temperature(cfg.tcu_channel)
                     if actual_t is not None and not math.isnan(float(actual_t)):
                         if abs(actual_t - cfg.temperature_c) > tolerance_c * 2:
                             raise RuntimeError(

@@ -12,16 +12,23 @@ import sys
 import toml
 from pathlib import Path
 
+# Keep Qt's scale independent of the desktop account's inherited Qt settings.
+os.environ['QT_AUTO_SCREEN_SCALE_FACTOR'] = '0'
+os.environ['QT_ENABLE_HIGHDPI_SCALING'] = '0'
+os.environ['QT_SCALE_FACTOR'] = os.environ.get('APS_QT_SCALE_FACTOR', '1')
+os.environ['QT_FONT_DPI'] = '96'
+
 from pymeasure.display.Qt import QtWidgets, QtCore
 from pymeasure.display.windows.managed_dock_window import ManagedDockWindow
 from pymeasure.experiment import unique_filename
 
-from PyQt5.QtGui import QIcon
+from PyQt5.QtGui import QFont, QIcon
 from datetime import datetime
 
 from procedures.random import RandomProcedure
 
 log = logging.getLogger(__name__)
+APPLICATION_ICON = Path(__file__).resolve().with_name('ZE.png')
 # Ensure logs directory exists and configure file-based logging when possible.
 logs_dir = Path('./logs')
 log_filename = logs_dir / f"{datetime.now():%Y-%m-%d_%H-%M-%S}.log"
@@ -196,6 +203,24 @@ class MainWindow(ManagedDockWindow):
             y_axis=y_axis
         )
 
+        if getattr(procedure_class, 'internal_name', '') == 'Gate_Switching_Stress':
+            from gss_parallel_manager import GSSParallelManager
+
+            old_manager = self.manager
+            self.manager = GSSParallelManager(
+                self.widget_list,
+                self.browser,
+                log_level=self.log_level,
+                parent=self,
+            )
+            self.manager.abort_returned.connect(self.abort_returned)
+            self.manager.queued.connect(self.queued)
+            self.manager.running.connect(self.running)
+            self.manager.finished.connect(self.finished)
+            self.manager.log.connect(self.log.handle)
+            old_manager.deleteLater()
+            log.info('GSS parallel experiment manager enabled')
+
         # Re-layout the parameter inputs so each label sits inline with its
         # entry field (instead of stacked above it), which is much more
         # compact for procedures with many parameters.
@@ -235,7 +260,7 @@ class MainWindow(ManagedDockWindow):
         self.file_input.filename_fixed = False                      # Controls whether the filename-field is frozen (but still displayed)
 
         self.setWindowTitle('ZE APS Measurement GUI')
-        self.setWindowIcon(QIcon('ze.png'))
+        self.setWindowIcon(QIcon(str(APPLICATION_ICON)))
 
         # Delay plot customization to ensure widgets are created
         QtCore.QTimer.singleShot(100, self._customize_plots)
@@ -286,6 +311,31 @@ class MainWindow(ManagedDockWindow):
         
         # Restore saved input parameters after UI is fully ready
         QtCore.QTimer.singleShot(200, self._restore_input_parameters)
+
+    def new_curve(self, wdg, results, color=None, **kwargs):
+        """Create one GSS plot curve for each DUT instead of one mixed trace."""
+        if (
+            getattr(results.procedure, 'internal_name', '') == 'Gate_Switching_Stress'
+            and wdg is self.dock_widget
+        ):
+            import pyqtgraph as pg
+            from gss_plotting import new_dut_curves
+
+            if color is None:
+                color = pg.intColor(self.browser.topLevelItemCount() % 8)
+            controller_id = results.procedure.gss_serial or 'Unknown'
+            return [
+                curve
+                for plot_widget in wdg.plot_frames
+                for curve in new_dut_curves(
+                    plot_widget,
+                    results,
+                    results.procedure.num_duts,
+                    color,
+                    controller_id,
+                )
+            ]
+        return super().new_curve(wdg, results, color=color, **kwargs)
 
     def _make_inputs_compact(self):
         """Re-layout pymeasure's auto-generated InputsWidget so each label and
@@ -1021,9 +1071,28 @@ class MainWindow(ManagedDockWindow):
         except Exception:
             log.debug('Failed to auto-resume after queue', exc_info=True)
 
+    def abort_returned(self, experiment):
+        """Keep controls enabled until every parallel run has returned."""
+        if self.manager.is_running():
+            return
+        super().abort_returned(experiment)
+
+    def finished(self, experiment):
+        """Do not mark a parallel GSS window idle while another run is active."""
+        if self.manager.is_running() or self.manager.experiments.has_next():
+            return
+        super().finished(experiment)
+
 
 if __name__ == "__main__":
+    QtCore.QCoreApplication.setAttribute(QtCore.Qt.AA_DisableHighDpiScaling)
+    QtCore.QCoreApplication.setAttribute(QtCore.Qt.AA_Use96Dpi)
     app = QtWidgets.QApplication(sys.argv)
+    application_font = QFont(app.font())
+    application_font.setPointSize(10)
+    app.setFont(application_font)
+    app.setDesktopFileName('ze-aps-gui')
+    app.setWindowIcon(QIcon(str(APPLICATION_ICON)))
     
     # Show startup dialog first
     from startup_dialog import show_startup_dialog
