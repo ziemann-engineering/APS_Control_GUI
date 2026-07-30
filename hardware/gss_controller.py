@@ -509,7 +509,8 @@ class GSSController:
                 data = f.read()
             m = _DATE_RE.search(data)
             if m:
-                return _parse_build_date(m.group(0).decode('ascii', errors='ignore'))
+                # get the second dater found, this will be from the ID command we compare against (instead of the info command)
+                return _parse_build_date(m.group(1).decode('ascii', errors='ignore')) 
         except OSError:
             pass
         return None
