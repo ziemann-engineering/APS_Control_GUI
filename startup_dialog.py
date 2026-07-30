@@ -712,7 +712,7 @@ class GSSAllDeviceScanThread(QThread):
     # per-device ID parsing function.
     _KNOWN_SERIAL_DEVICES = (
         ('GSS Control Board', 'gss'),
-        ('TCU', 'tcu'),
+        ('TCUv2', 'tcu'),
     )
 
     def run(self):

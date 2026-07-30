@@ -468,7 +468,7 @@ class KeithleySMU:
         drain_channel = 'b' if gate_channel == 'a' else 'a'
         gate = f'smu{gate_channel}'
         drain = f'smu{drain_channel}'
-        source_limit_i = max(abs(threshold_i) * 100.0, 10e-3)
+        source_limit_i = max(abs(threshold_i) * 3.0, 10e-3)
         script = (
             f'{gate}.reset() {drain}.reset() '
             f'{gate}.source.func = {gate}.OUTPUT_DCVOLTS '
@@ -527,7 +527,8 @@ class KeithleySMU:
         drain_channel = 'b' if gate_channel == 'a' else 'a'
         gate = f'smu{gate_channel}'
         drain = f'smu{drain_channel}'
-        source_limit_i = max(abs(threshold_i) * 100.0, 10e-3)
+        source_limit_i = max(abs(threshold_i) * 3, 0.01)
+        log.info(f'Source limit: {source_limit_i} A')
         try:
             # Do not upload a multiline TSP script here.  Some VISA backends
             # used on Raspberry Pi do not preserve the script-upload command
@@ -558,6 +559,7 @@ class KeithleySMU:
                 raw = self._query(f'print({drain}.measure.i())')
                 try:
                     current = float(raw)
+                    log.debug(f'Voltage: {v} V, Current: {current} A')
                 except ValueError:
                     log.error(f'SMU TSP ramp: unexpected current response: {raw!r}')
                     return None
