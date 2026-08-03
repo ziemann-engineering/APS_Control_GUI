@@ -886,14 +886,20 @@ class _GSSDeviceTestThread(QThread):
                 self.result.emit(False, 'No valid response')
             return
 
-        prefix = 'TCU,SN:'
         with _serial.Serial(port, 38400, timeout=1.0) as ser:
             ser.reset_input_buffer()
-            ser.write(b'ID\r\n')
-            time.sleep(0.3)
-            data = ser.read(256).decode('ascii', errors='ignore')
-        if prefix in data:
-            self.result.emit(True, 'OK')
+            ser.write(b'*IDN?\n')
+            deadline = time.monotonic() + 1.0
+            response = ''
+            while time.monotonic() < deadline:
+                line = ser.readline().decode('ascii', errors='ignore').strip()
+                if line and line != '*IDN?':
+                    response = line
+                    break
+        if 'TCU' in response:
+            details = [field.strip() for field in response.split(',')]
+            serial_number = details[2] if len(details) > 2 else '?'
+            self.result.emit(True, f'OK (SN:{serial_number})')
         else:
             self.result.emit(False, 'No valid response')
 
