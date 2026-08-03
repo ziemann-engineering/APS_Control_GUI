@@ -169,7 +169,10 @@ class MainWindow(ManagedDockWindow):
         if discovered:
             try:
                 from procedures.GSS import update_device_choices
-                update_device_choices(discovered)
+                update_device_choices(
+                    discovered,
+                    startup_connections.get('gss_selected_devices', {}),
+                )
                 log.info(f'Updated GSS device choices: {len(discovered)} device(s)')
             except Exception:
                 log.debug('Could not update GSS device choices', exc_info=True)

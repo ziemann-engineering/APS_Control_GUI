@@ -53,7 +53,9 @@ log = logging.getLogger(__name__)
 _DEVICE_REGISTRY: Dict[str, dict] = {}  # serial_number → device info dict
 
 
-def update_device_choices(discovered_devices: list) -> None:
+def update_device_choices(
+    discovered_devices: list, selected_devices: Optional[Dict[str, str]] = None,
+) -> None:
     """Populate GateStressTest ListParameter choices from discovered devices.
 
     Call this from APS GUI.py *before* ManagedDockWindow.__init__ so that the
@@ -68,7 +70,7 @@ def update_device_choices(discovered_devices: list) -> None:
     def _serials(dtype: str):
         return [''] + [d['serial'] for d in discovered_devices if d.get('type') == dtype]
 
-    def _set_choices(param, choices):
+    def _set_choices(param, choices, selected=''):
         # ListParameter.choices is a read-only property (no setter) -- the
         # underlying _choices dict must be updated directly, otherwise the
         # assignment silently raises AttributeError and the dropdown never
@@ -76,8 +78,9 @@ def update_device_choices(discovered_devices: list) -> None:
         # APS GUI.py, hiding the failure).
         keys = [str(c) for c in choices]
         param._choices = {k: c for k, c in zip(keys, choices)}
-        param.default = choices[1]
-        param.value = choices[1]
+        value = selected if selected in choices else choices[1]
+        param.default = value
+        param.value = value
 
     gss_sn = _serials('gss')
     tcu_sn = _serials('tcu')
@@ -87,14 +90,15 @@ def update_device_choices(discovered_devices: list) -> None:
     ]
     smu_sn = _serials('keithley')
 
+    selected_devices = selected_devices or {}
     if gss_sn[1:]:
-        _set_choices(GateStressTest.gss_serial, gss_sn)
+        _set_choices(GateStressTest.gss_serial, gss_sn, selected_devices.get('gss', ''))
     if tcu_sn[1:]:
-        _set_choices(GateStressTest.tcu_serial, tcu_sn)
+        _set_choices(GateStressTest.tcu_serial, tcu_sn, selected_devices.get('tcu', ''))
     if psu_sn[1:]:
-        _set_choices(GateStressTest.psu_serial, psu_sn)
+        _set_choices(GateStressTest.psu_serial, psu_sn, selected_devices.get('nge103', '') or selected_devices.get('hmc8043', ''))
     if smu_sn[1:]:
-        _set_choices(GateStressTest.smu_serial, smu_sn)
+        _set_choices(GateStressTest.smu_serial, smu_sn, selected_devices.get('keithley', ''))
 
 
 # ---------------------------------------------------------------------------
@@ -1530,8 +1534,8 @@ class GateStressTest(Procedure):
     def _connect_tcu(self, port: str):
         """Connect to a TCU and return the driver object, or None on failure."""
         try:
-            from hardware.tcu_driver import TCUDriver
-            tcu = TCUDriver(port)
+            from hardware.ZE_TCUv2 import ZETCUv2
+            tcu = ZETCUv2(port)
             if tcu.connect():
                 log.info(f'TCU connected on {port}')
                 return tcu
