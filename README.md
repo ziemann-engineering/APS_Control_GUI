@@ -516,7 +516,9 @@ Below the file field, a directory chooser (labeled **Local Directory**) sets the
 | DUT Count | — | 1 – 8 | 1 | Number of DUTs connected to this GSS controller |
 | Switching Frequency | Hz | 1 000 – 10 000 000 | 100 000 | Gate switching frequency |
 | Duty Cycle | — | 0.01 – 0.99 | 0.5 | Gate switching duty cycle |
-| Vth Method | — | force_current / ramp_voltage | force_current | Method used to measure threshold voltage |
+| Vth Method | — | force_current / ramp_voltage | force_current | Method used to measure threshold voltage; `ramp_voltage` runs configurable coarse and fine passes, each with pre-bias |
+| Vth Ramp Coarse Step Size | V | 0 – 10 | 0.05 | Full-range coarse sweep step; set to 0 to skip the coarse pass |
+| Vth Ramp Fine Step Size | V | 0 – 10 | 0.001 | Refinement step within the detected coarse interval; set to 0 to skip the fine pass. When coarse is 0, this sweeps the full range |
 | Vth Force Current | µA | 0.1 – 10 000 | 250 | Force current for Vth measurement (force_current method) |
 | Vth Precondition Voltage | V | 0 – 30 | 0.0 | Gate preconditioning voltage before Vth measurement |
 | Vth Threshold Current | nA | 0.001 – 1 000 000 | 1000 | Current threshold for ramp_voltage Vth method |
@@ -529,11 +531,10 @@ Below the file field, a directory chooser (labeled **Local Directory**) sets the
 | TCU | — | discovered serials | — | Serial number of the temperature controller |
 | TCU Channel | — | 1 – 4 | 1 | TCU channel index (1-based) |
 | Temperature | °C | −40 – 250 | 25.0 | Target DUT temperature |
-| Log Interval | s | 10 – 3600 | 60 | Period between telemetry log entries |
 | Vth Measurement Interval | min | 5 – 1440 | 60 | Period between Vth measurements |
 | NAS Backup Directory | — | — | *(empty)* | Optional destination that mirrors the Results file, typically a NAS mount point — see [Data Storage](#gss-data-storage) |
 
-#### Data Output (per log entry, per DUT)
+#### Data Output (per emitted row, per DUT)
 
 | Column | Description |
 |---|---|
@@ -586,7 +587,7 @@ The hourly sync runs in a background thread.  If the NAS is unreachable the warn
    - Set **V_on** and **V_off** to the gate driver voltage levels.
    - If using temperature control, set **Temperature** and the correct **TCU Channel**.
    - Choose the **Vth Method**: `force_current` forces a constant current and measures gate voltage (standard); `ramp_voltage` sweeps gate voltage and detects the current threshold.
-   - Adjust **Log Interval** and **Vth Measurement Interval** as needed.
+   - Adjust **Vth Measurement Interval** as needed.
    - Optionally set **NAS Backup Directory** to a second destination (e.g. `/mnt/nas/GSS`) for an additional hourly backup copy of the Results file.
    - To stress several controllers at once, queue one GSS experiment per controller (each with its own **Local Directory**/filename) rather than configuring several controllers in a single run.
 
@@ -594,7 +595,7 @@ The hourly sync runs in a background thread.  If the NAS is unreachable the warn
    - Enter a filename and verify the output directory.
    - Click **Start**.
    - The software connects to all instruments, configures the PSU rails, sets the temperature (if TCU enabled), and starts each GSS controller in a dedicated background thread.
-   - Telemetry (cycles, temperature, PSU voltage) is logged every **Log Interval** seconds.
+   - Telemetry (cycles, temperature, PSU voltage) is logged at procedure state changes, progress polls, Vth measurements, and batch completion.
    - Vth is measured for every DUT every **Vth Measurement Interval** minutes, one DUT at a time, with the SMU protected by a mutex.
 
 5. **Monitoring a long-duration test:**
@@ -808,7 +809,7 @@ Serial port: e.g., `COM7` or `/dev/ttyUSB1`.
 
 #### Usage (GSS)
 
-During a GSS stress test, the TCU maintains the DUT at the target temperature. Each GSS worker applies the configured temperature to its assigned TCU channel at startup. The actual temperature is read back and logged every **Log Interval** seconds.
+During a GSS stress test, the TCU maintains the DUT at the target temperature. Each GSS worker applies the configured temperature to its assigned TCU channel at startup. The actual temperature is read back whenever the procedure emits telemetry.
 
 ---
 

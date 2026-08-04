@@ -112,3 +112,90 @@ def test_switching_does_not_wait_for_another_controllers_vth_lock():
         assert worker.controller.selected == []
     finally:
         smu_lock.release()
+
+
+def test_ramp_vth_uses_coarse_then_fine_sweeps_with_precondition():
+    class RecordingSMU:
+        def __init__(self):
+            self.calls = []
+
+        def measure_vth_ramp(self, **kwargs):
+            self.calls.append(kwargs)
+            return 3.5 if len(self.calls) == 1 else 3.472
+
+    events = []
+    smu = RecordingSMU()
+    worker = make_worker('GSS-A', smu, threading.RLock(), events)
+
+    worker._measure_vth_all_duts()
+
+    assert smu.calls == [
+        {
+            'precondition_voltage_v': 15.0,
+            'start_voltage_v': 6.0,
+            'stop_voltage_v': 0.0,
+            'step_voltage_v': 0.05,
+            'threshold_current_a': 1e-3,
+        },
+        {
+            'precondition_voltage_v': 15.0,
+            'start_voltage_v': 3.55,
+            'stop_voltage_v': 3.5,
+            'step_voltage_v': 0.001,
+            'threshold_current_a': 1e-3,
+        },
+    ]
+    assert worker.last_vth == {1: 3.472}
+
+
+def test_ramp_vth_skips_fine_sweep_when_coarse_sweep_reaches_endpoint():
+    class RecordingSMU:
+        def __init__(self):
+            self.calls = []
+
+        def measure_vth_ramp(self, **kwargs):
+            self.calls.append(kwargs)
+            return kwargs['stop_voltage_v']
+
+    events = []
+    smu = RecordingSMU()
+    worker = make_worker('GSS-A', smu, threading.RLock(), events)
+
+    worker._measure_vth_all_duts()
+
+    assert len(smu.calls) == 1
+    assert worker.last_vth == {1: 0.0}
+
+
+def test_ramp_vth_can_skip_either_configured_pass():
+    class RecordingSMU:
+        def __init__(self):
+            self.calls = []
+
+        def measure_vth_ramp(self, **kwargs):
+            self.calls.append(kwargs)
+            return 3.5
+
+    events = []
+    smu = RecordingSMU()
+    worker = make_worker('GSS-A', smu, threading.RLock(), events)
+    worker.cfg.vth_ramp_fine_step_voltage = 0
+
+    worker._measure_vth_all_duts()
+
+    assert [call['step_voltage_v'] for call in smu.calls] == [0.05]
+
+    smu.calls.clear()
+    worker.cfg.vth_ramp_step_voltage = 0
+    worker.cfg.vth_ramp_fine_step_voltage = 0.001
+
+    worker._measure_vth_all_duts()
+
+    assert [call['step_voltage_v'] for call in smu.calls] == [0.001]
+
+    smu.calls.clear()
+    worker.cfg.vth_ramp_fine_step_voltage = 0
+
+    worker._measure_vth_all_duts()
+
+    assert smu.calls == []

@@ -8,8 +8,9 @@ itself always manages exactly one controller.
 
 Data saved
 ----------
-* One CSV row per DUT per log interval, emitted via pymeasure's results
-  mechanism. This is the same "Results" CSV file shown in the GUI's
+* One CSV row per DUT at procedure state changes, progress polls, Vth
+    measurements, and batch completion, emitted via pymeasure's results
+    mechanism. This is the same "Results" CSV file shown in the GUI's
   browser/plot (saved under the toolbar's Directory field).
 * That single Results file (and its checkpoint, used to resume after a
   crash/restart) is periodically mirrored to *nas_directory* when
@@ -127,6 +128,7 @@ class ControllerConfig:
     vth_ramp_start_voltage: float = 6.0
     vth_ramp_stop_voltage: float = 0.0
     vth_ramp_step_voltage: float = 0.05
+    vth_ramp_fine_step_voltage: float = 0.001
     vth_threshold_current: float = 1e-3
     vth_compliance_voltage: float = 10.0
 
@@ -647,6 +649,12 @@ class GSSWorker:
         method = self.cfg.vth_method
         precond_v = self.cfg.vth_precond_voltage
         threshold_i = vth_current
+        coarse_step_v = self.cfg.vth_ramp_step_voltage
+        fine_step_v = self.cfg.vth_ramp_fine_step_voltage
+
+        if method == 'ramp_voltage' and coarse_step_v == 0 and fine_step_v == 0:
+            log.info(f'[{self.cfg.id}] Vth ramp measurement skipped: both step sizes are 0 V')
+            return
 
         while not self._stop_requested():
             if self.smu_lock.acquire(timeout=1.0):
@@ -661,13 +669,37 @@ class GSSWorker:
                 self._select_dut_for_measurement(dut)
 
                 if method == 'ramp_voltage':
-                    vth = self.smu.measure_vth_ramp(
-                        precondition_voltage_v=precond_v,
-                        start_voltage_v=self.cfg.vth_ramp_start_voltage,
-                        stop_voltage_v=self.cfg.vth_ramp_stop_voltage,
-                        step_voltage_v=self.cfg.vth_ramp_step_voltage,
-                        threshold_current_a=threshold_i,
-                    )
+                    ramp_start_v = self.cfg.vth_ramp_start_voltage
+                    ramp_stop_v = self.cfg.vth_ramp_stop_voltage
+                    vth = None
+                    if coarse_step_v > 0:
+                        vth = self.smu.measure_vth_ramp(
+                            precondition_voltage_v=precond_v,
+                            start_voltage_v=ramp_start_v,
+                            stop_voltage_v=ramp_stop_v,
+                            step_voltage_v=coarse_step_v,
+                            threshold_current_a=threshold_i,
+                        )
+                    if coarse_step_v > 0 and fine_step_v > 0 and vth is not None and vth != ramp_stop_v:
+                        direction = 1 if ramp_stop_v > ramp_start_v else -1
+                        fine_start_v = vth - direction * coarse_step_v
+                        fine_start_v = min(max(fine_start_v, min(ramp_start_v, ramp_stop_v)),
+                                           max(ramp_start_v, ramp_stop_v))
+                        vth = self.smu.measure_vth_ramp(
+                            precondition_voltage_v=precond_v,
+                            start_voltage_v=fine_start_v,
+                            stop_voltage_v=vth,
+                            step_voltage_v=fine_step_v,
+                            threshold_current_a=threshold_i,
+                        )
+                    elif coarse_step_v == 0 and fine_step_v > 0:
+                        vth = self.smu.measure_vth_ramp(
+                            precondition_voltage_v=precond_v,
+                            start_voltage_v=ramp_start_v,
+                            stop_voltage_v=ramp_stop_v,
+                            step_voltage_v=fine_step_v,
+                            threshold_current_a=threshold_i,
+                        )
                 else:
                     self.smu.apply_precondition_voltage(
                         precond_voltage_v=precond_v,
@@ -788,8 +820,12 @@ class GateStressTest(Procedure):
         default=0.0, minimum=0.0, maximum=30.0,
     )
     vth_ramp_step_voltage = FloatParameter(
-        'Vth Ramp Step Size', units='V',
-        default=0.05, minimum=0.001, maximum=10.0,
+        'Vth Ramp Coarse Step Size', units='V',
+        default=0.05, minimum=0.0, maximum=10.0,
+    )
+    vth_ramp_fine_step_voltage = FloatParameter(
+        'Vth Ramp Fine Step Size', units='V',
+        default=0.001, minimum=0.0, maximum=10.0,
     )
     # vth_current_ma is used as both force current (force_current mode) and
     # threshold current (ramp_voltage mode).
@@ -838,11 +874,6 @@ class GateStressTest(Procedure):
     batch_duration_min = FloatParameter(
         'Batch Duration', units='min',
         default=60.0, minimum=0.1, maximum=1440.0,
-    )
-
-    log_interval_s = IntegerParameter(
-        'Log Interval', units='s',
-        default=60, minimum=10, maximum=3600,
     )
     vth_interval_min = IntegerParameter(
         'Vth Measurement Interval', units='min',
@@ -913,6 +944,7 @@ class GateStressTest(Procedure):
         'vth_ramp_start_voltage',
         'vth_ramp_stop_voltage',
         'vth_ramp_step_voltage',
+        'vth_ramp_fine_step_voltage',
         'vth_compliance_voltage',
         'vth_interval_min',
         'pre_start_vth',
@@ -930,7 +962,6 @@ class GateStressTest(Procedure):
         # ---- General Settings ----
         'target_cycles',
         'batch_duration_min',
-        'log_interval_s',
         'hardware_retry_count',
         'hardware_retry_delay_s',
         'operator_retry_wait_s',
@@ -1057,6 +1088,7 @@ class GateStressTest(Procedure):
             vth_ramp_start_voltage=self.vth_ramp_start_voltage,
             vth_ramp_stop_voltage=self.vth_ramp_stop_voltage,
             vth_ramp_step_voltage=self.vth_ramp_step_voltage,
+            vth_ramp_fine_step_voltage=self.vth_ramp_fine_step_voltage,
             vth_threshold_current=self.vth_current_ma * 1e-3,
             vth_compliance_voltage=self.vth_compliance_voltage,
             psu_resource=psu_resource,
