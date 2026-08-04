@@ -58,14 +58,18 @@ class KeithleySMU:
     _FAMILY_2450 = '2450'  # 2450
     _FAMILY_2400 = '2400'  # 2400/2410
 
-    def __init__(self, resource: str):
+    def __init__(self, resource: str, use_tsp_script_upload: bool = True):
         """
         Parameters
         ----------
         resource:
             VISA resource string, e.g. 'GPIB::26', 'USB0::0x05E6::…::INSTR'.
+        use_tsp_script_upload:
+            Upload and run the timing-critical TSP ramp on the instrument when
+            using pyvisa-py.  Set to False to use the host-driven fallback.
         """
         self.resource = resource
+        self.use_tsp_script_upload = use_tsp_script_upload
         self._rm: Optional[pyvisa.ResourceManager] = None
         self._instr = None
         self._family: Optional[str] = None
@@ -443,7 +447,14 @@ class KeithleySMU:
     ) -> Optional[float]:
         """Run the TSP ramp using the best implementation for the VISA backend."""
         if self._is_pyvisa_py_backend():
-            log.info('SMU TSP ramp: using pyvisa-py line-by-line fallback')
+            if self.use_tsp_script_upload:
+                log.info('SMU TSP ramp: using pyvisa-py short-write script upload')
+                return self._ramp_vth_tsp_uploaded_script(
+                    channel, precondition_v, precondition_s, break_s,
+                    start_v, stop_v, step_v, threshold_i,
+                )
+
+            log.info('SMU TSP ramp: using pyvisa-py host-driven fallback')
             return self._ramp_vth_tsp_direct(
                 channel, precondition_v, precondition_s, break_s,
                 start_v, stop_v, step_v, threshold_i,
@@ -504,6 +515,81 @@ class KeithleySMU:
             f'print(vth)'
         )
         raw = self._query(f'do {script} end')
+        try:
+            return float(raw)
+        except ValueError:
+            log.error(f'SMU TSP ramp: unexpected response: {raw!r}')
+            return None
+
+    def _ramp_vth_tsp_uploaded_script(
+        self,
+        channel: str,
+        precondition_v: float,
+        precondition_s: float,
+        break_s: float,
+        start_v: float, stop_v: float, step_v: float, threshold_i: float,
+    ) -> Optional[float]:
+        """Upload a TSP script as short USBTMC writes, then run it on the SMU."""
+        gate_channel = channel if channel in ('a', 'b') else 'a'
+        drain_channel = 'b' if gate_channel == 'a' else 'a'
+        gate = f'smu{gate_channel}'
+        drain = f'smu{drain_channel}'
+        source_limit_i = max(abs(threshold_i) * 100.0, 10e-3)
+        script_lines = (
+            f'{gate}.reset()',
+            f'{drain}.reset()',
+            f'{gate}.source.func = {gate}.OUTPUT_DCVOLTS',
+            f'{drain}.source.func = {drain}.OUTPUT_DCVOLTS',
+            f'{gate}.source.limiti = {source_limit_i:.6e}',
+            f'{drain}.source.limiti = {source_limit_i:.6e}',
+            f'{drain}.measure.autorangei = {drain}.AUTORANGE_ON',
+            f'{gate}.source.levelv = {precondition_v:.4f}',
+            f'{drain}.source.levelv = 0',
+            f'{gate}.source.output = {gate}.OUTPUT_ON',
+            f'{drain}.source.output = {drain}.OUTPUT_ON',
+            f'delay({precondition_s:.6f})',
+            f'{gate}.source.levelv = 0',
+            f'delay({break_s:.6f})',
+            f'local vth = {stop_v:.4f}',
+            f'local v = {start_v:.4f}',
+            f'local step = {step_v:.4f}',
+            f'while ((step > 0 and v <= {stop_v:.4f}) or (step < 0 and v >= {stop_v:.4f})) do',
+            f'    {gate}.source.levelv = v',
+            f'    {drain}.source.levelv = v',
+            '    delay(0.002)',
+            f'    local i = {drain}.measure.i()',
+            f'    if ((step > 0 and math.abs(i) >= {threshold_i:.6e}) or',
+            f'        (step < 0 and math.abs(i) <= {threshold_i:.6e})) then',
+            '        vth = v',
+            '        break',
+            '    end',
+            '    v = v + step',
+            'end',
+            f'{gate}.source.output = {gate}.OUTPUT_OFF',
+            f'{drain}.source.output = {drain}.OUTPUT_OFF',
+            f'{gate}.reset()',
+            f'{drain}.reset()',
+            'print(vth)',
+        )
+
+        self._write('errorqueue.clear()')
+        self._write('loadscript aps_vth_ramp')
+        for line in script_lines:
+            self._write(line)
+        self._write('endscript')
+
+        error_count_raw = self._query('print(errorqueue.count)')
+        try:
+            error_count = int(float(error_count_raw))
+        except ValueError as exc:
+            raise SMUError(
+                f'SMU TSP script upload returned invalid error count: {error_count_raw!r}'
+            ) from exc
+        if error_count:
+            error = self._query('print(errorqueue.next())')
+            raise SMUError(f'SMU TSP script upload failed: {error}')
+
+        raw = self._query('aps_vth_ramp()')
         try:
             return float(raw)
         except ValueError:
