@@ -158,7 +158,7 @@ def test_ramp_vth_uses_coarse_then_fine_sweeps_with_precondition(caplog):
     ) in caplog.messages
 
 
-def test_ramp_vth_skips_fine_sweep_when_coarse_sweep_reaches_endpoint():
+def test_ramp_vth_skips_fine_sweep_when_coarse_sweep_reaches_endpoint(caplog):
     class RecordingSMU:
         def __init__(self):
             self.calls = []
@@ -171,10 +171,15 @@ def test_ramp_vth_skips_fine_sweep_when_coarse_sweep_reaches_endpoint():
     smu = RecordingSMU()
     worker = make_worker('GSS-A', smu, threading.RLock(), events)
 
+    caplog.set_level(logging.WARNING, logger='procedures.GSS')
     worker._measure_vth_all_duts()
 
     assert len(smu.calls) == 1
     assert worker.last_vth == {1: 0.0}
+    assert (
+        '[GSS-A] DUT 1: Measured device Vth appears out of range, '
+        'check DUT contact and range settings.'
+    ) in caplog.messages
 
 
 def test_ramp_vth_can_skip_either_configured_pass():

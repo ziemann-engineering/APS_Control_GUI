@@ -737,6 +737,13 @@ class GSSWorker:
                 if vth is None:
                     log.warning(f'[{self.cfg.id}] DUT {dut} Vth measurement failed')
                     raise RuntimeError(f'DUT {dut} Vth measurement failed')
+                if method == 'ramp_voltage' and (
+                    math.isclose(vth, ramp_start_v) or math.isclose(vth, ramp_stop_v)
+                ):
+                    log.warning(
+                        f'[{self.cfg.id}] DUT {dut}: Measured device Vth appears out of range, '
+                        'check DUT contact and range settings.'
+                    )
                 self.last_vth[dut] = vth
                 log.info(f'[{self.cfg.id}] DUT {dut} Vth = {vth:.4f} V')
         finally:
