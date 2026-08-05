@@ -681,7 +681,11 @@ class GSSWorker:
                             threshold_current_a=threshold_i,
                         )
                         if coarse_vth is not None:
-                            log.info(f'[{self.cfg.id}] DUT {dut} Vth coarse pass = {coarse_vth:.4f} V')
+                            log.info(
+                                f'[{self.cfg.id}] DUT {dut} Vth coarse pass = {coarse_vth:.4f} V '
+                                f'(range {ramp_start_v:.4f} to {ramp_stop_v:.4f} V, '
+                                f'step {coarse_step_v:.4f} V)'
+                            )
                         vth = coarse_vth
                     if coarse_step_v > 0 and fine_step_v > 0 and vth is not None and vth != ramp_stop_v:
                         direction = 1 if ramp_stop_v > ramp_start_v else -1
@@ -696,7 +700,11 @@ class GSSWorker:
                             threshold_current_a=threshold_i,
                         )
                         if fine_vth is not None:
-                            log.info(f'[{self.cfg.id}] DUT {dut} Vth fine pass = {fine_vth:.4f} V')
+                            log.info(
+                                f'[{self.cfg.id}] DUT {dut} Vth fine pass = {fine_vth:.4f} V '
+                                f'(range {fine_start_v:.4f} to {vth:.4f} V, '
+                                f'step {fine_step_v:.4f} V)'
+                            )
                         vth = fine_vth
                     elif coarse_step_v == 0 and fine_step_v > 0:
                         fine_vth = self.smu.measure_vth_ramp(
@@ -707,7 +715,11 @@ class GSSWorker:
                             threshold_current_a=threshold_i,
                         )
                         if fine_vth is not None:
-                            log.info(f'[{self.cfg.id}] DUT {dut} Vth fine pass = {fine_vth:.4f} V')
+                            log.info(
+                                f'[{self.cfg.id}] DUT {dut} Vth fine pass = {fine_vth:.4f} V '
+                                f'(range {ramp_start_v:.4f} to {ramp_stop_v:.4f} V, '
+                                f'step {fine_step_v:.4f} V)'
+                            )
                         vth = fine_vth
                 else:
                     self.smu.apply_precondition_voltage(

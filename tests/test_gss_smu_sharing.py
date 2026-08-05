@@ -148,8 +148,14 @@ def test_ramp_vth_uses_coarse_then_fine_sweeps_with_precondition(caplog):
         },
     ]
     assert worker.last_vth == {1: 3.472}
-    assert '[GSS-A] DUT 1 Vth coarse pass = 3.5000 V' in caplog.messages
-    assert '[GSS-A] DUT 1 Vth fine pass = 3.4720 V' in caplog.messages
+    assert (
+        '[GSS-A] DUT 1 Vth coarse pass = 3.5000 V '
+        '(range 6.0000 to 0.0000 V, step 0.0500 V)'
+    ) in caplog.messages
+    assert (
+        '[GSS-A] DUT 1 Vth fine pass = 3.4720 V '
+        '(range 3.5500 to 3.5000 V, step 0.0010 V)'
+    ) in caplog.messages
 
 
 def test_ramp_vth_skips_fine_sweep_when_coarse_sweep_reaches_endpoint():
