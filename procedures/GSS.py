@@ -690,19 +690,22 @@ class GSSWorker:
                     if coarse_step_v > 0 and fine_step_v > 0 and vth is not None and vth != ramp_stop_v:
                         direction = 1 if ramp_stop_v > ramp_start_v else -1
                         fine_start_v = vth - direction * coarse_step_v
+                        fine_stop_v = vth + direction * coarse_step_v
                         fine_start_v = min(max(fine_start_v, min(ramp_start_v, ramp_stop_v)),
+                                           max(ramp_start_v, ramp_stop_v))
+                        fine_stop_v = min(max(fine_stop_v, min(ramp_start_v, ramp_stop_v)),
                                            max(ramp_start_v, ramp_stop_v))
                         fine_vth = self.smu.measure_vth_ramp(
                             precondition_voltage_v=precond_v,
                             start_voltage_v=fine_start_v,
-                            stop_voltage_v=vth,
+                            stop_voltage_v=fine_stop_v,
                             step_voltage_v=fine_step_v,
                             threshold_current_a=threshold_i,
                         )
                         if fine_vth is not None:
                             log.info(
                                 f'[{self.cfg.id}] DUT {dut} Vth fine pass = {fine_vth:.4f} V '
-                                f'(range {fine_start_v:.4f} to {vth:.4f} V, '
+                                f'(range {fine_start_v:.4f} to {fine_stop_v:.4f} V, '
                                 f'step {fine_step_v:.4f} V)'
                             )
                         vth = fine_vth

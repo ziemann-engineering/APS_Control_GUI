@@ -142,7 +142,7 @@ def test_ramp_vth_uses_coarse_then_fine_sweeps_with_precondition(caplog):
         {
             'precondition_voltage_v': 15.0,
             'start_voltage_v': 3.55,
-            'stop_voltage_v': 3.5,
+            'stop_voltage_v': 3.45,
             'step_voltage_v': 0.001,
             'threshold_current_a': 1e-3,
         },
@@ -154,7 +154,7 @@ def test_ramp_vth_uses_coarse_then_fine_sweeps_with_precondition(caplog):
     ) in caplog.messages
     assert (
         '[GSS-A] DUT 1 Vth fine pass = 3.4720 V '
-        '(range 3.5500 to 3.5000 V, step 0.0010 V)'
+        '(range 3.5500 to 3.4500 V, step 0.0010 V)'
     ) in caplog.messages
 
 
