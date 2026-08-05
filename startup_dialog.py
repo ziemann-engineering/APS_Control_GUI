@@ -804,7 +804,9 @@ class GSSAllDeviceScanThread(QThread):
                 resource = _normalize_visa_resource(res)
                 if resource != res:
                     log.warning('Removed non-printable characters from VISA resource %r', res)
-                with rm.open_resource(resource) as inst:
+                # VISA backends can require their exact resource string for
+                # discovery even when it contains a non-printable terminator.
+                with rm.open_resource(res) as inst:
                     inst.timeout = self._VISA_PROBE_TIMEOUT_MS
                     idn = inst.query('*IDN?').strip()
                 idn_u = idn.upper()
