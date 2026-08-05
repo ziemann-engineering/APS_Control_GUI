@@ -8,10 +8,11 @@ RAMP_ARGS = ('a', 15.0, 0.1, 0.01, 6.0, 0.0, -0.005, 2.8e-3)
 
 
 class KeithleyTSPUploadTest(unittest.TestCase):
-    def test_constructor_removes_control_characters_from_resource(self):
-        smu = KeithleySMU('USB0::0x05E6::2636::123456\x00\r\n::INSTR')
+    def test_constructor_preserves_opaque_visa_resource(self):
+        resource = 'USB0::0x05E6::2636::123456\x00\r\n::INSTR'
+        smu = KeithleySMU(resource)
 
-        self.assertEqual(smu.resource, 'USB0::0x05E6::2636::123456::INSTR')
+        self.assertEqual(smu.resource, resource)
 
     def test_connect_retries_a_first_open_failure(self):
         first_manager = Mock()

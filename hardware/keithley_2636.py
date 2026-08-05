@@ -70,19 +70,12 @@ class KeithleySMU:
             Upload and run the timing-critical TSP ramp on the instrument when
             using pyvisa-py.  Set to False to use the host-driven fallback.
         """
-        self.resource = self._normalize_resource(resource)
-        if self.resource != resource:
-            log.warning('Removed non-printable characters from SMU resource %r', resource)
+        self.resource = resource
         self.use_tsp_script_upload = use_tsp_script_upload
         self._rm: Optional[pyvisa.ResourceManager] = None
         self._instr = None
         self._family: Optional[str] = None
         self.idn: str = ''
-
-    @staticmethod
-    def _normalize_resource(resource: str) -> str:
-        """Remove accidental control characters from a VISA resource string."""
-        return ''.join(character for character in str(resource) if character.isprintable()).strip()
 
     # ------------------------------------------------------------------
     # Connection management
