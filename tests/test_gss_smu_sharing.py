@@ -1,3 +1,4 @@
+import logging
 import queue
 import threading
 
@@ -114,7 +115,7 @@ def test_switching_does_not_wait_for_another_controllers_vth_lock():
         smu_lock.release()
 
 
-def test_ramp_vth_uses_coarse_then_fine_sweeps_with_precondition():
+def test_ramp_vth_uses_coarse_then_fine_sweeps_with_precondition(caplog):
     class RecordingSMU:
         def __init__(self):
             self.calls = []
@@ -127,6 +128,7 @@ def test_ramp_vth_uses_coarse_then_fine_sweeps_with_precondition():
     smu = RecordingSMU()
     worker = make_worker('GSS-A', smu, threading.RLock(), events)
 
+    caplog.set_level(logging.INFO, logger='procedures.GSS')
     worker._measure_vth_all_duts()
 
     assert smu.calls == [
@@ -146,6 +148,8 @@ def test_ramp_vth_uses_coarse_then_fine_sweeps_with_precondition():
         },
     ]
     assert worker.last_vth == {1: 3.472}
+    assert '[GSS-A] DUT 1 Vth coarse pass = 3.5000 V' in caplog.messages
+    assert '[GSS-A] DUT 1 Vth fine pass = 3.4720 V' in caplog.messages
 
 
 def test_ramp_vth_skips_fine_sweep_when_coarse_sweep_reaches_endpoint():
