@@ -33,6 +33,11 @@ from pymeasure.experiment import Procedure
 log = logging.getLogger(__name__)
 
 
+def _normalize_visa_resource(resource) -> str:
+    """Remove accidental control characters from a VISA resource string."""
+    return ''.join(character for character in str(resource) if character.isprintable()).strip()
+
+
 def discover_procedures():
     """
     Automatically discover all procedure classes in the procedures folder.
@@ -197,6 +202,7 @@ class ConnectionTestThread(QThread):
             if key in self.connection_params and self.connection_params.get(key):
                 resource = self.connection_params.get(key)
                 break
+            resource = _normalize_visa_resource(resource)
         log.info(f"Testing Keithley SMU connection with resource: {resource}")
         if not resource:
             log.warning("Keithley connection test failed: No resource address provided")
@@ -795,7 +801,10 @@ class GSSAllDeviceScanThread(QThread):
         for res in resources:
             self.progress.emit(f'Querying {res}…')
             try:
-                with rm.open_resource(res) as inst:
+                resource = _normalize_visa_resource(res)
+                if resource != res:
+                    log.warning('Removed non-printable characters from VISA resource %r', res)
+                with rm.open_resource(resource) as inst:
                     inst.timeout = self._VISA_PROBE_TIMEOUT_MS
                     idn = inst.query('*IDN?').strip()
                 idn_u = idn.upper()
@@ -803,13 +812,13 @@ class GSSAllDeviceScanThread(QThread):
                 sn = parts[2] if len(parts) > 2 else idn[:30]
                 if 'NGE100' in idn_u or 'NGE103' in idn_u:
                     self.device_found.emit({'type': 'nge103', 'serial': sn,
-                                           'resource': res, 'display': f'{sn}  ({res})'})
+                                           'resource': resource, 'display': f'{sn}  ({resource})'})
                 elif 'HMC8043' in idn_u:
                     self.device_found.emit({'type': 'hmc8043', 'serial': sn,
-                                           'resource': res, 'display': f'{sn}  ({res})'})
+                                           'resource': resource, 'display': f'{sn}  ({resource})'})
                 elif any(m in idn_u for m in ('2636', '2604', '2450', '2410')):
                     self.device_found.emit({'type': 'keithley', 'serial': sn,
-                                           'resource': res, 'display': f'{sn}  ({res})'})
+                                           'resource': resource, 'display': f'{sn}  ({resource})'})
             except Exception:
                 pass
 
@@ -904,7 +913,7 @@ class _GSSDeviceTestThread(QThread):
             self.result.emit(False, 'No valid response')
 
     def _test_visa(self):
-        resource = self.info.get('resource', '')
+        resource = _normalize_visa_resource(self.info.get('resource', ''))
         rm = pyvisa.ResourceManager()
         with rm.open_resource(resource) as inst:
             inst.timeout = 3000
@@ -1149,7 +1158,23 @@ class GSSHardwareScanWidget(QGroupBox):
         if not isinstance(devices, list):
             return
 
-        self._devices = [device for device in devices if isinstance(device, dict)]
+        self._devices = []
+        for device in devices:
+            if not isinstance(device, dict):
+                continue
+            cleaned_device = dict(device)
+            if 'resource' in cleaned_device:
+                cleaned_resource = _normalize_visa_resource(cleaned_device['resource'])
+                if cleaned_resource != cleaned_device['resource']:
+                    log.warning(
+                        'Removed non-printable characters from saved VISA resource %r',
+                        cleaned_device['resource'],
+                    )
+                cleaned_device['resource'] = cleaned_resource
+                cleaned_device['display'] = (
+                    f"{cleaned_device.get('serial', '?')}  ({cleaned_resource})"
+                )
+            self._devices.append(cleaned_device)
         for dev_type, _ in self._ROWS:
             combo = self._combos[dev_type]
             combo.clear()

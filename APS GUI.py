@@ -315,6 +315,38 @@ class MainWindow(ManagedDockWindow):
         # Restore saved input parameters after UI is fully ready
         QtCore.QTimer.singleShot(200, self._restore_input_parameters)
 
+        self._add_emergency_stop_button()
+
+    def _add_emergency_stop_button(self):
+        """Add an immediate-stop action beside PyMeasure's soft Abort control."""
+        abort_button = getattr(self, 'abort_button', None)
+        if abort_button is None or not hasattr(self.manager, 'emergency_abort'):
+            return
+        abort_button.setText('Abort')
+        abort_button.setToolTip('Finish the current measurement, then stop')
+
+        toolbar = abort_button.parentWidget()
+        if not isinstance(toolbar, QtWidgets.QToolBar):
+            return
+        self.emergency_stop_button = QtWidgets.QPushButton('Emergency Stop', toolbar)
+        self.emergency_stop_button.setToolTip(
+            'Immediately cancel all active measurements; instrument cleanup may be interrupted'
+        )
+        self.emergency_stop_button.clicked.connect(self._emergency_stop)
+        self.emergency_stop_button.setStyleSheet(
+            'QPushButton { background-color: #b3261e; color: white; font-weight: bold; }'
+            'QPushButton:hover { background-color: #8f1f19; }'
+            'QPushButton:disabled { background-color: #8b8b8b; }'
+        )
+        toolbar.addWidget(self.emergency_stop_button)
+
+    def _emergency_stop(self):
+        """Immediately stop every active experiment through its manager."""
+        manager = getattr(self, 'manager', None)
+        emergency_abort = getattr(manager, 'emergency_abort', None)
+        if emergency_abort is not None:
+            emergency_abort()
+
     def new_curve(self, wdg, results, color=None, **kwargs):
         """Create one GSS plot curve for each DUT instead of one mixed trace."""
         if (

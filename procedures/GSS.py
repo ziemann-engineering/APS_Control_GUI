@@ -210,7 +210,6 @@ class GSSWorker:
         self.status: str = 'initializing'
         self.last_error: str = ''
         self.batch_number: int = 0
-        self._allow_post_stop_work = False
 
     # ------------------------------------------------------------------
     # Thread management
@@ -229,6 +228,12 @@ class GSSWorker:
     def stop(self, timeout: float = 10.0):
         """Signal the worker to stop and wait for its thread to finish."""
         self._stop_event.set()
+        if self.smu_lock.acquire(blocking=False):
+            try:
+                if self.smu is not None and hasattr(self.smu, 'emergency_shutdown'):
+                    self.smu.emergency_shutdown()
+            finally:
+                self.smu_lock.release()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=timeout)
 
@@ -322,14 +327,11 @@ class GSSWorker:
                     self._save_checkpoint(target_cycles)
                     self._emit_all_rows()
 
-        if self.smu is not None and self.procedure.post_shutdown_vth:
+        if (self.smu is not None and self.procedure.post_shutdown_vth
+                and not self._stop_requested()):
             self.status = 'post-run Vth'
             self._emit_all_rows()
-            self._allow_post_stop_work = True
-            try:
-                self._run_with_retries(self._measure_vth_all_duts, 'post-run Vth measurement')
-            finally:
-                self._allow_post_stop_work = False
+            self._run_with_retries(self._measure_vth_all_duts, 'post-run Vth measurement')
             self._save_checkpoint(target_cycles)
             self._emit_all_rows()
 
@@ -450,8 +452,6 @@ class GSSWorker:
         return False
 
     def _stop_requested(self) -> bool:
-        if self._allow_post_stop_work:
-            return False
         return self._stop_event.is_set() or self.procedure.should_stop()
 
     def _sleep_interruptible(self, seconds: float) -> bool:

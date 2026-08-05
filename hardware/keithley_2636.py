@@ -70,12 +70,19 @@ class KeithleySMU:
             Upload and run the timing-critical TSP ramp on the instrument when
             using pyvisa-py.  Set to False to use the host-driven fallback.
         """
-        self.resource = resource
+        self.resource = self._normalize_resource(resource)
+        if self.resource != resource:
+            log.warning('Removed non-printable characters from SMU resource %r', resource)
         self.use_tsp_script_upload = use_tsp_script_upload
         self._rm: Optional[pyvisa.ResourceManager] = None
         self._instr = None
         self._family: Optional[str] = None
         self.idn: str = ''
+
+    @staticmethod
+    def _normalize_resource(resource: str) -> str:
+        """Remove accidental control characters from a VISA resource string."""
+        return ''.join(character for character in str(resource) if character.isprintable()).strip()
 
     # ------------------------------------------------------------------
     # Connection management
@@ -173,6 +180,7 @@ class KeithleySMU:
                 return None
         except Exception as exc:
             log.error(f'SMU measure_vth error: {exc}')
+            self.emergency_shutdown()
             return None
 
     # ------------------------------------------------------------------
@@ -197,6 +205,24 @@ class KeithleySMU:
     def _query(self, cmd: str) -> str:
         return self._instr.query(cmd).strip()
 
+    def emergency_shutdown(self):
+        """Disable SMU outputs and clear pending I/O after a failed measurement."""
+        if self._instr is None:
+            return
+
+        try:
+            if self._family == self._FAMILY_TSP:
+                self._write('abort')
+                self._write('smua.source.output = smua.OUTPUT_OFF')
+                self._write('smub.source.output = smub.OUTPUT_OFF')
+                self._write('errorqueue.clear()')
+            else:
+                self._write(':ABOR')
+                self._write(':OUTP OFF')
+            self._instr.clear()
+        except Exception as exc:
+            log.warning(f'SMU emergency shutdown error: {exc}')
+
     # ------ TSP (2636B / 2604B) ------
 
     def _measure_vth_tsp(
@@ -207,20 +233,26 @@ class KeithleySMU:
     ) -> Optional[float]:
         """Vth measurement via Lua/TSP scripting (2636B, 2604B)."""
         smu = f'smu{channel}'  # e.g. 'smua' or 'smub'
+        completed = False
+        try:
+            self._write(f'{smu}.reset()')
+            self._write(f'{smu}.source.func = {smu}.OUTPUT_DCAMPS')
+            self._write(f'{smu}.source.leveli = {force_current_a:.6e}')
+            self._write(f'{smu}.source.limitv = {compliance_voltage_v:.4f}')
+            self._write(f'{smu}.measure.autorangev = {smu}.AUTORANGE_ON')
+            self._write(f'{smu}.source.output = {smu}.OUTPUT_ON')
 
-        self._write(f'{smu}.reset()')
-        self._write(f'{smu}.source.func = {smu}.OUTPUT_DCAMPS')
-        self._write(f'{smu}.source.leveli = {force_current_a:.6e}')
-        self._write(f'{smu}.source.limitv = {compliance_voltage_v:.4f}')
-        self._write(f'{smu}.measure.autorangev = {smu}.AUTORANGE_ON')
-        self._write(f'{smu}.source.output = {smu}.OUTPUT_ON')
+            # Allow the source to settle
+            time.sleep(0.1)
 
-        # Allow the source to settle
-        time.sleep(0.1)
-
-        raw = self._query(f'print({smu}.measure.v())')
-        self._write(f'{smu}.source.output = {smu}.OUTPUT_OFF')
-        self._write(f'{smu}.reset()')
+            raw = self._query(f'print({smu}.measure.v())')
+            completed = True
+        finally:
+            if completed:
+                self._write(f'{smu}.source.output = {smu}.OUTPUT_OFF')
+                self._write(f'{smu}.reset()')
+            else:
+                self.emergency_shutdown()
 
         try:
             return float(raw)
@@ -342,6 +374,7 @@ class KeithleySMU:
                 self._write(':OUTP OFF')
         except Exception as exc:
             log.warning(f'SMU precondition voltage error: {exc}')
+            self.emergency_shutdown()
 
     def measure_vth_ramp(
         self,
@@ -433,6 +466,7 @@ class KeithleySMU:
                 )
         except Exception as exc:
             log.error(f'SMU measure_vth_ramp error: {exc}')
+            self.emergency_shutdown()
             return None
 
     def _is_pyvisa_py_backend(self) -> bool:
