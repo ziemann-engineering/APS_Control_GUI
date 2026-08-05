@@ -30,7 +30,7 @@ from procedures.random import RandomProcedure
 log = logging.getLogger(__name__)
 APPLICATION_ICON = Path(__file__).resolve().with_name('ZE.png')
 # Ensure logs directory exists and configure file-based logging when possible.
-logs_dir = Path('./logs')
+logs_dir = Path(__file__).resolve().parent / 'logs'
 log_filename = logs_dir / f"{datetime.now():%Y-%m-%d_%H-%M-%S}.log"
 
 try:
