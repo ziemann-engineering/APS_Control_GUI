@@ -318,31 +318,42 @@ class MainWindow(ManagedDockWindow):
         self._add_emergency_stop_button()
 
     def _add_emergency_stop_button(self):
-        """Add an immediate-stop action beside PyMeasure's soft Abort control."""
+        """Add a floating immediate-stop action independent of PyMeasure's layout."""
         abort_button = getattr(self, 'abort_button', None)
         if abort_button is None or not hasattr(self.manager, 'emergency_abort'):
             return
         abort_button.setText('Abort')
         abort_button.setToolTip('Finish the current measurement, then stop')
 
-        toolbar = abort_button.parentWidget()
-        while toolbar is not None and not isinstance(toolbar, QtWidgets.QToolBar):
-            toolbar = toolbar.parentWidget()
-        if toolbar is None:
-            log.warning('Could not locate the toolbar containing the Abort button')
-            return
-        self.emergency_stop_button = QtWidgets.QPushButton('E-Stop', toolbar)
+        self.emergency_stop_button = QtWidgets.QPushButton('E-Stop', self)
         self.emergency_stop_button.setToolTip(
             'Immediately cancel all active measurements; instrument cleanup may be interrupted'
         )
-        self.emergency_stop_button.setFixedWidth(64)
+        self.emergency_stop_button.setFixedSize(72, 32)
         self.emergency_stop_button.clicked.connect(self._emergency_stop)
         self.emergency_stop_button.setStyleSheet(
             'QPushButton { background-color: #b3261e; color: white; font-weight: bold; }'
             'QPushButton:hover { background-color: #8f1f19; }'
             'QPushButton:disabled { background-color: #8b8b8b; }'
         )
-        toolbar.addWidget(self.emergency_stop_button)
+        self._position_emergency_stop_button()
+        self.emergency_stop_button.show()
+        self.emergency_stop_button.raise_()
+
+    def _position_emergency_stop_button(self):
+        """Keep the floating E-Stop button visible in the lower-right corner."""
+        button = getattr(self, 'emergency_stop_button', None)
+        if button is None:
+            return
+        margin = 12
+        button.move(
+            max(margin, self.width() - button.width() - margin),
+            max(margin, self.height() - button.height() - margin),
+        )
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._position_emergency_stop_button()
 
     def _emergency_stop(self):
         """Immediately stop every active experiment through its manager."""
