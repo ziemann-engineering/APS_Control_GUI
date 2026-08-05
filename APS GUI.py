@@ -315,55 +315,6 @@ class MainWindow(ManagedDockWindow):
         # Restore saved input parameters after UI is fully ready
         QtCore.QTimer.singleShot(200, self._restore_input_parameters)
 
-        self._add_emergency_stop_button()
-
-    def _add_emergency_stop_button(self):
-        """Add a floating immediate-stop action independent of PyMeasure's layout."""
-        abort_button = getattr(self, 'abort_button', None)
-        if abort_button is None or not hasattr(self.manager, 'emergency_abort'):
-            return
-        abort_button.setText('Abort')
-        abort_button.setToolTip('Finish the current measurement, then stop')
-
-        self.emergency_stop_button = QtWidgets.QPushButton('E-Stop', self)
-        self.emergency_stop_button.setToolTip(
-            'Immediately cancel all active measurements; instrument cleanup may be interrupted'
-        )
-        self.emergency_stop_button.setFixedSize(52, 52)
-        self.emergency_stop_button.clicked.connect(self._emergency_stop)
-        self.emergency_stop_button.setStyleSheet(
-            'QPushButton { background-color: #c62828; border: 2px solid #7f0000; '
-            'border-radius: 26px; color: white; font-size: 10px; font-weight: bold; }'
-            'QPushButton:hover { background-color: #8e0000; }'
-            'QPushButton:pressed { background-color: #600000; }'
-            'QPushButton:disabled { background-color: #8b8b8b; border-color: #5f5f5f; }'
-        )
-        self._position_emergency_stop_button()
-        self.emergency_stop_button.show()
-        self.emergency_stop_button.raise_()
-
-    def _position_emergency_stop_button(self):
-        """Keep the floating E-Stop button visible in the lower-right corner."""
-        button = getattr(self, 'emergency_stop_button', None)
-        if button is None:
-            return
-        margin = 12
-        button.move(
-            max(margin, self.width() - button.width() - margin),
-            max(margin, self.height() - button.height() - margin),
-        )
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self._position_emergency_stop_button()
-
-    def _emergency_stop(self):
-        """Immediately stop every active experiment through its manager."""
-        manager = getattr(self, 'manager', None)
-        emergency_abort = getattr(manager, 'emergency_abort', None)
-        if emergency_abort is not None:
-            emergency_abort()
-
     def new_curve(self, wdg, results, color=None, **kwargs):
         """Create one GSS plot curve for each DUT instead of one mixed trace."""
         if (
@@ -775,20 +726,6 @@ class MainWindow(ManagedDockWindow):
                 self.restoreState(state)
         except Exception:
             log.debug('restoreState failed', exc_info=True)
-        self._fit_window_to_screen()
-
-    def _fit_window_to_screen(self):
-        """Keep saved window geometry within the current screen's usable area."""
-        screen = QtWidgets.QApplication.primaryScreen()
-        if screen is None:
-            return
-        available = screen.availableGeometry()
-        geometry = self.geometry()
-        width = min(geometry.width(), available.width())
-        height = min(geometry.height(), available.height())
-        x = min(max(geometry.x(), available.left()), available.right() - width + 1)
-        y = min(max(geometry.y(), available.top()), available.bottom() - height + 1)
-        self.setGeometry(x, y, width, height)
 
     def _save_layout(self):
         try:

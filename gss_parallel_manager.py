@@ -103,20 +103,6 @@ class GSSParallelManager(Manager):
             worker.stop()
             self.aborted.emit(experiment)
 
-    def emergency_abort(self):
-        """Immediately cancel every active GSS experiment."""
-        if not self._runs:
-            return
-        self._start_on_add = False
-        self._is_continuous = False
-        for experiment, (worker, _monitor) in list(self._runs.items()):
-            terminate = getattr(worker, 'terminate', None)
-            if callable(terminate):
-                terminate()
-            else:
-                worker.stop()
-            self.aborted.emit(experiment)
-
     def resume(self):
         self._start_on_add = True
         self._is_continuous = True
