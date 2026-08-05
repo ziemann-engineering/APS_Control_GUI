@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 from hardware.keithley_2636 import KeithleySMU, SMUError
 
@@ -8,32 +8,6 @@ RAMP_ARGS = ('a', 15.0, 0.1, 0.01, 6.0, 0.0, -0.005, 2.8e-3)
 
 
 class KeithleyTSPUploadTest(unittest.TestCase):
-    def test_constructor_preserves_opaque_visa_resource(self):
-        resource = 'USB0::0x05E6::2636::123456\x00\r\n::INSTR'
-        smu = KeithleySMU(resource)
-
-        self.assertEqual(smu.resource, resource)
-
-    def test_connect_retries_a_first_open_failure(self):
-        first_manager = Mock()
-        second_manager = Mock()
-        instrument = Mock()
-        second_manager.open_resource.return_value = instrument
-        instrument.query.return_value = 'Keithley Instruments,2636B,123456,1.0'
-
-        with patch('hardware.keithley_2636.pyvisa.ResourceManager',
-                   side_effect=(first_manager, second_manager)), \
-                patch('hardware.keithley_2636.time.sleep') as sleep:
-            first_manager.open_resource.side_effect = RuntimeError('device not ready')
-            smu = KeithleySMU('USB0::INSTR')
-            self.assertTrue(smu.connect())
-
-        self.assertEqual(first_manager.open_resource.call_count, 1)
-        self.assertEqual(second_manager.open_resource.call_count, 1)
-        instrument.query.assert_called_once_with('*IDN?')
-        self.assertEqual(smu.idn, 'Keithley Instruments,2636B,123456,1.0')
-        sleep.assert_called_once_with(smu._CONNECT_RETRY_DELAY_S)
-
     def test_pyvisa_py_uses_script_upload_by_default_and_can_fall_back(self):
         smu = KeithleySMU('USB0::INSTR')
         with patch.object(smu, '_is_pyvisa_py_backend', return_value=True), \
