@@ -57,6 +57,8 @@ class KeithleySMU:
     _FAMILY_TSP = 'tsp'    # 2600-series (2636B, 2604B, …)
     _FAMILY_2450 = '2450'  # 2450
     _FAMILY_2400 = '2400'  # 2400/2410
+    _CONNECT_ATTEMPTS = 2
+    _CONNECT_RETRY_DELAY_S = 0.25
 
     def __init__(self, resource: str, use_tsp_script_upload: bool = True):
         """
@@ -84,27 +86,33 @@ class KeithleySMU:
 
         Returns True on success, False on failure.
         """
-        try:
-            self._rm = pyvisa.ResourceManager()
-            self._instr = self._rm.open_resource(self.resource)
-            self._instr.timeout = 10_000  # 10 s
+        for attempt in range(1, self._CONNECT_ATTEMPTS + 1):
+            try:
+                self._rm = pyvisa.ResourceManager()
+                self._instr = self._rm.open_resource(self.resource)
+                self._instr.timeout = 10_000  # 10 s
 
-            self.idn = self._instr.query('*IDN?').strip()
-            log.info(f'SMU IDN: {self.idn}')
+                self.idn = self._instr.query('*IDN?').strip()
+                log.info(f'SMU IDN: {self.idn}')
 
-            self._family = self._detect_family(self.idn)
-            if self._family is None:
-                log.error(f'Unrecognised SMU model: {self.idn}')
+                self._family = self._detect_family(self.idn)
+                if self._family is None:
+                    log.error(f'Unrecognised SMU model: {self.idn}')
+                    self.disconnect()
+                    return False
+
+                log.info(f'SMU connected: {self.resource} (family={self._family})')
+                return True
+            except Exception as exc:
                 self.disconnect()
-                return False
-
-            log.info(f'SMU connected: {self.resource} (family={self._family})')
-            return True
-
-        except Exception as exc:
-            log.error(f'SMU connect failed: {exc}')
-            self.disconnect()
-            return False
+                if attempt == self._CONNECT_ATTEMPTS:
+                    log.error(f'SMU connect failed: {exc}')
+                    return False
+                log.warning(
+                    f'SMU connect attempt {attempt} failed: {exc}; retrying after transport reset'
+                )
+                time.sleep(self._CONNECT_RETRY_DELAY_S)
+        return False
 
     def disconnect(self):
         """Close the VISA connection."""
