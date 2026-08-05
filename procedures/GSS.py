@@ -228,12 +228,6 @@ class GSSWorker:
     def stop(self, timeout: float = 10.0):
         """Signal the worker to stop and wait for its thread to finish."""
         self._stop_event.set()
-        if self.smu_lock.acquire(blocking=False):
-            try:
-                if self.smu is not None and hasattr(self.smu, 'emergency_shutdown'):
-                    self.smu.emergency_shutdown()
-            finally:
-                self.smu_lock.release()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=timeout)
 

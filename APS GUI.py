@@ -326,12 +326,16 @@ class MainWindow(ManagedDockWindow):
         abort_button.setToolTip('Finish the current measurement, then stop')
 
         toolbar = abort_button.parentWidget()
-        if not isinstance(toolbar, QtWidgets.QToolBar):
+        while toolbar is not None and not isinstance(toolbar, QtWidgets.QToolBar):
+            toolbar = toolbar.parentWidget()
+        if toolbar is None:
+            log.warning('Could not locate the toolbar containing the Abort button')
             return
-        self.emergency_stop_button = QtWidgets.QPushButton('Emergency Stop', toolbar)
+        self.emergency_stop_button = QtWidgets.QPushButton('E-Stop', toolbar)
         self.emergency_stop_button.setToolTip(
             'Immediately cancel all active measurements; instrument cleanup may be interrupted'
         )
+        self.emergency_stop_button.setFixedWidth(64)
         self.emergency_stop_button.clicked.connect(self._emergency_stop)
         self.emergency_stop_button.setStyleSheet(
             'QPushButton { background-color: #b3261e; color: white; font-weight: bold; }'
