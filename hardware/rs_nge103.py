@@ -10,12 +10,20 @@ Usage:
     python test_rs_nge103.py
 """
 
-import pyvisa
+import logging
 import time
+
+import pyvisa
 from typing import Optional, List, Dict
+
+
+log = logging.getLogger(__name__)
 
 class NGE100:
     """Interface lib for Rohde & Schwarz NGE100 power supplies."""
+
+    CONNECT_ATTEMPTS = 3
+    CONNECT_RETRY_DELAY_S = 0.5
     
     def __init__(self, resource_string: str, channels: int = 3):
         """
@@ -31,22 +39,43 @@ class NGE100:
         self.num_channels = channels
         
     def connect(self) -> bool:
-        """Connect to the power supply."""
-        try:
-            self.psu = self.rm.open_resource(self.resource_string)
-            self.psu.timeout = 5000  # 5 second timeout
+        """Connect to the power supply, retrying transient VISA USB errors."""
+        for attempt in range(1, self.CONNECT_ATTEMPTS + 1):
+            try:
+                self.psu = self.rm.open_resource(self.resource_string)
+                self.psu.timeout = 5000  # 5 second timeout
 
-            # Test connection
-            ID = self.ID()
-            if "Rohde&Schwarz,NGE10" not in ID:
-                print("Connected to unsupported device:", ID)
+                identifier = self.ID()
+                if "Rohde&Schwarz,NGE10" not in identifier:
+                    log.error("Unsupported device on %s: %s", self.resource_string, identifier.strip())
+                    self._close_resource()
+                    return False
+                return True
+            except Exception as exc:
+                self._close_resource()
+                if attempt == self.CONNECT_ATTEMPTS:
+                    log.error(
+                        "NGE100 connection failed on %s after %d attempts: %s",
+                        self.resource_string, attempt, exc,
+                    )
+                    return False
+                log.warning(
+                    "NGE100 connection attempt %d/%d failed on %s: %s; retrying in %.1f s",
+                    attempt, self.CONNECT_ATTEMPTS, self.resource_string, exc,
+                    self.CONNECT_RETRY_DELAY_S,
+                )
+                time.sleep(self.CONNECT_RETRY_DELAY_S)
+        return False
+
+    def _close_resource(self):
+        """Close a partially opened VISA resource before another connection attempt."""
+        if self.psu is not None:
+            try:
+                self.psu.close()
+            except Exception:
+                log.debug("Failed to close VISA resource after connection error", exc_info=True)
+            finally:
                 self.psu = None
-                return False
-            return True
-
-        except Exception:
-            self.psu = None
-            return False
             
     def ID(self) -> bool:
         """Connect to the power supply."""
@@ -57,9 +86,7 @@ class NGE100:
 
     def disconnect(self):
         """Disconnect from the power supply."""
-        if self.psu:
-            self.psu.close()
-            self.psu = None
+        self._close_resource()
         self.rm.close()
     
     def reset(self):

@@ -36,6 +36,7 @@ class KeithleyTSPUploadTest(unittest.TestCase):
         self.assertEqual(writes[0:2], ['errorqueue.clear()', 'loadscript aps_vth_ramp'])
         self.assertEqual(writes[-1], 'endscript')
         self.assertLess(max(map(len, writes)), 512)
+        self.assertIn('smub.measure.rangei = 1.000000e-02', writes)
         self.assertEqual(queries, ['print(errorqueue.count)', 'aps_vth_ramp()'])
 
     def test_uploaded_script_reports_tsp_compile_error(self):

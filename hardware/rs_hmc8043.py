@@ -21,6 +21,9 @@ log = logging.getLogger(__name__)
 
 class RSHMC8043Controller:
     """Controller for Rohde & Schwarz HMC8043 power supply."""
+
+    CONNECT_ATTEMPTS = 3
+    CONNECT_RETRY_DELAY_S = 0.5
     
     def __init__(self, resource_string: str):
         """
@@ -35,25 +38,44 @@ class RSHMC8043Controller:
         self.num_channels = 3  # HMC8043 has 3 channels
         
     def connect(self) -> bool:
-        """Connect to the power supply."""
-        try:
-            self.psu = self.rm.open_resource(self.resource_string)
-            self.psu.timeout = 5000  # 5 second timeout
-            
-            # Test connection
-            idn = self.psu.query('*IDN?').strip()
-            print(f"Connected to: {idn}")
-            return True
-            
-        except Exception as e:
-            print(f"Failed to connect to power supply: {e}")
-            return False
+        """Connect to the power supply, retrying transient VISA USB errors."""
+        for attempt in range(1, self.CONNECT_ATTEMPTS + 1):
+            try:
+                self.psu = self.rm.open_resource(self.resource_string)
+                self.psu.timeout = 5000  # 5 second timeout
+
+                idn = self.psu.query('*IDN?').strip()
+                log.info("Connected to: %s", idn)
+                return True
+            except Exception as exc:
+                self._close_resource()
+                if attempt == self.CONNECT_ATTEMPTS:
+                    log.error(
+                        "HMC8043 connection failed on %s after %d attempts: %s",
+                        self.resource_string, attempt, exc,
+                    )
+                    return False
+                log.warning(
+                    "HMC8043 connection attempt %d/%d failed on %s: %s; retrying in %.1f s",
+                    attempt, self.CONNECT_ATTEMPTS, self.resource_string, exc,
+                    self.CONNECT_RETRY_DELAY_S,
+                )
+                time.sleep(self.CONNECT_RETRY_DELAY_S)
+        return False
+
+    def _close_resource(self):
+        """Close a partially opened VISA resource before another connection attempt."""
+        if self.psu is not None:
+            try:
+                self.psu.close()
+            except Exception:
+                log.debug("Failed to close VISA resource after connection error", exc_info=True)
+            finally:
+                self.psu = None
     
     def disconnect(self):
         """Disconnect from the power supply."""
-        if self.psu:
-            self.psu.close()
-            self.psu = None
+        self._close_resource()
         self.rm.close()
     
     def reset(self):

@@ -486,7 +486,7 @@ class KeithleySMU:
             f'{drain}.source.func = {drain}.OUTPUT_DCVOLTS '
             f'{gate}.source.limiti = {source_limit_i:.6e} '
             f'{drain}.source.limiti = {source_limit_i:.6e} '
-            f'{drain}.measure.autorangei = {drain}.AUTORANGE_ON '
+            f'{drain}.measure.rangei = 1.000000e-02 '
             f'{gate}.source.levelv = {precondition_v:.4f} '
             f'{drain}.source.levelv = 0 '
             f'{gate}.source.output = {gate}.OUTPUT_ON '
@@ -542,7 +542,7 @@ class KeithleySMU:
             f'{drain}.source.func = {drain}.OUTPUT_DCVOLTS',
             f'{gate}.source.limiti = {source_limit_i:.6e}',
             f'{drain}.source.limiti = {source_limit_i:.6e}',
-            f'{drain}.measure.autorangei = {drain}.AUTORANGE_ON',
+            f'{drain}.measure.rangei = 1.000000e-02',
             f'{gate}.source.levelv = {precondition_v:.4f}',
             f'{drain}.source.levelv = 0',
             f'{gate}.source.output = {gate}.OUTPUT_ON',
@@ -625,7 +625,7 @@ class KeithleySMU:
             self._write(f'{drain}.source.func = {drain}.OUTPUT_DCVOLTS')
             self._write(f'{gate}.source.limiti = {source_limit_i:.6e}')
             self._write(f'{drain}.source.limiti = {source_limit_i:.6e}')
-            self._write(f'{drain}.measure.autorangei = {drain}.AUTORANGE_ON')
+            self._write(f'{drain}.measure.rangei = 1.000000e-02')
             self._write(f'{gate}.source.levelv = {precondition_v:.4f}')
             self._write(f'{drain}.source.levelv = 0')
             self._write(f'{gate}.source.output = {gate}.OUTPUT_ON')
@@ -677,7 +677,7 @@ class KeithleySMU:
         self._write(':SOUR:VOLT:RANG:AUTO ON')
         self._write(f':SOUR:VOLT:ILIM {abs(threshold_i) * 100:.6e}')
         self._write(':SENS:FUNC "CURR"')
-        self._write(':SENS:CURR:RANG:AUTO ON')
+        self._write(':SENS:CURR:RANG 1.000000e-02')
         self._write(f':SOUR:VOLT:LEV {start_v:.4f}')
         self._write(':OUTP ON')
 

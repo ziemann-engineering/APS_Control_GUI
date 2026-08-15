@@ -1549,7 +1549,7 @@ class GateStressTest(Procedure):
             from hardware.rs_nge103 import NGE100
             psu = NGE100(resource)
             if psu.connect():
-                log.info(f'PSU connected: {resource} ({psu.ID().strip()})')
+                log.info(f'PSU connected: {resource}')
                 return psu
             # Try HMC8043 as fallback
             from hardware.rs_hmc8043 import RSHMC8043Controller
