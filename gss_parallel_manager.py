@@ -94,6 +94,7 @@ class GSSParallelManager(Manager):
             self.next()
 
     def abort(self):
+        """Request an orderly stop after the current worker operation."""
         if not self._runs:
             raise Exception('Attempting to abort when no experiment is running')
         self._start_on_add = False

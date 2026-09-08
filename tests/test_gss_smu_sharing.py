@@ -1,3 +1,4 @@
+import logging
 import queue
 import threading
 
@@ -130,7 +131,7 @@ def test_switching_does_not_wait_for_another_controllers_vth_lock():
         smu_lock.release()
 
 
-def test_ramp_vth_uses_coarse_then_fine_sweeps_with_precondition():
+def test_ramp_vth_uses_coarse_then_fine_sweeps_with_precondition(caplog):
     class RecordingSMU:
         def __init__(self):
             self.calls = []
@@ -143,6 +144,7 @@ def test_ramp_vth_uses_coarse_then_fine_sweeps_with_precondition():
     smu = RecordingSMU()
     worker = make_worker('GSS-A', smu, threading.RLock(), events)
 
+    caplog.set_level(logging.INFO, logger='procedures.GSS')
     worker._measure_vth_all_duts()
 
     assert smu.calls == [
@@ -156,15 +158,23 @@ def test_ramp_vth_uses_coarse_then_fine_sweeps_with_precondition():
         {
             'precondition_voltage_v': 15.0,
             'start_voltage_v': 3.55,
-            'stop_voltage_v': 3.5,
+            'stop_voltage_v': 3.45,
             'step_voltage_v': 0.001,
             'threshold_current_a': 1e-3,
         },
     ]
     assert worker.last_vth == {1: 3.472}
+    assert (
+        '[GSS-A] DUT 1 Vth coarse pass = 3.5000 V '
+        '(range 6.0000 to 0.0000 V, step 0.0500 V)'
+    ) in caplog.messages
+    assert (
+        '[GSS-A] DUT 1 Vth fine pass = 3.4720 V '
+        '(range 3.5500 to 3.4500 V, step 0.0010 V)'
+    ) in caplog.messages
 
 
-def test_ramp_vth_skips_fine_sweep_when_coarse_sweep_reaches_endpoint():
+def test_ramp_vth_skips_fine_sweep_when_coarse_sweep_reaches_endpoint(caplog):
     class RecordingSMU:
         def __init__(self):
             self.calls = []
@@ -177,10 +187,15 @@ def test_ramp_vth_skips_fine_sweep_when_coarse_sweep_reaches_endpoint():
     smu = RecordingSMU()
     worker = make_worker('GSS-A', smu, threading.RLock(), events)
 
+    caplog.set_level(logging.WARNING, logger='procedures.GSS')
     worker._measure_vth_all_duts()
 
     assert len(smu.calls) == 1
     assert worker.last_vth == {1: 0.0}
+    assert (
+        '[GSS-A] DUT 1: Measured device Vth appears out of range, '
+        'check DUT contact and range settings.'
+    ) in caplog.messages
 
 
 def test_ramp_vth_can_skip_either_configured_pass():

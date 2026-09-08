@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from hardware.keithley_2636 import KeithleySMU
 
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format='%(asctime)s  %(levelname)-8s  %(name)s: %(message)s',
 )
 
@@ -35,15 +35,15 @@ VISA_RESOURCE = os.environ.get('APS_SMU_RESOURCE') or None
 CHANNEL = 'a'               # 'a' or 'b' for 2636B; ignored for 2450/2410
 
 # Force-current method (vth_method = 'force_current')
-FORCE_CURRENT_A = 2.8e-3      # vth_current_ma = 1.0 → 1 mA
+FORCE_CURRENT_A = 2.85e-3      # vth_current_ma = 1.0 → 1 mA
 COMPLIANCE_V    = 10.0      # vth_compliance_voltage
 
 # Ramp-voltage method (vth_method = 'ramp_voltage')
 PRECOND_V       = 20       # vth_precond_voltage  (0.0 = skip)
-START_V         = 6.0       # vth_ramp_start_voltage
+START_V         = 4.5       # vth_ramp_start_voltage
 STOP_V          = 0.0       # vth_ramp_stop_voltage
-STEP_V          = 0.005      # vth_ramp_step_voltage
-THRESHOLD_I_A   = 2.8e-3      # vth_threshold_current
+STEP_V          = 0.001      # vth_ramp_step_voltage
+THRESHOLD_I_A   = 2.85e-3      # vth_threshold_current
 # ---------------------------------------------------------------------------
 
 
@@ -72,7 +72,7 @@ def find_smu_resource():
         for resource in resources:
             try:
                 with rm.open_resource(resource) as instrument:
-                    instrument.timeout = 3_000
+                    instrument.timeout = 1_000
                     idn = instrument.query('*IDN?').strip()
                 print(f'  {resource} -> {idn}')
                 if any(model in idn.upper() for model in ('2636', '2604', '2602', '2450', '2410')):
@@ -100,14 +100,14 @@ def main():
 
     print(f'Connected: {smu.idn}')
 
-    # --- Force-current Vth ---
-    print('\n--- Force-current Vth ---')
-    vth_fc = smu.measure_vth(
-        channel=CHANNEL,
-        force_current_a=FORCE_CURRENT_A,
-        compliance_voltage_v=COMPLIANCE_V,
-    )
-    print(f'Vth (force-current, {FORCE_CURRENT_A*1e3:.3g} mA): {vth_fc} V')
+    # # --- Force-current Vth ---
+    # print('\n--- Force-current Vth ---')
+    # vth_fc = smu.measure_vth(
+        # channel=CHANNEL,
+        # force_current_a=FORCE_CURRENT_A,
+        # compliance_voltage_v=COMPLIANCE_V,
+    # )
+    # print(f'Vth (force-current, {FORCE_CURRENT_A*1e3:.3g} mA): {vth_fc:.4e} V')
 
     # --- Ramp-voltage Vth ---
     print('\n--- Ramp-voltage Vth ---')
@@ -119,7 +119,7 @@ def main():
         step_voltage_v=STEP_V,
         threshold_current_a=THRESHOLD_I_A,
     )
-    print(f'Vth (ramp, {START_V} V → {STOP_V} V, I_th={THRESHOLD_I_A:.1e} A): {vth_ramp} V')
+    print(f'Vth (ramp, {START_V} V → {STOP_V} V, I_th={THRESHOLD_I_A:.3e} A): {vth_ramp:.4e} V')
 
     smu.disconnect()
     print('\nDone.')

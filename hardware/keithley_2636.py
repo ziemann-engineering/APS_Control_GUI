@@ -165,6 +165,7 @@ class KeithleySMU:
                 return None
         except Exception as exc:
             log.error(f'SMU measure_vth error: {exc}')
+            self.emergency_shutdown()
             return None
 
     # ------------------------------------------------------------------
@@ -189,6 +190,24 @@ class KeithleySMU:
     def _query(self, cmd: str) -> str:
         return self._instr.query(cmd).strip()
 
+    def emergency_shutdown(self):
+        """Disable SMU outputs and clear pending I/O after a failed measurement."""
+        if self._instr is None:
+            return
+
+        try:
+            if self._family == self._FAMILY_TSP:
+                self._write('abort')
+                self._write('smua.source.output = smua.OUTPUT_OFF')
+                self._write('smub.source.output = smub.OUTPUT_OFF')
+                self._write('errorqueue.clear()')
+            else:
+                self._write(':ABOR')
+                self._write(':OUTP OFF')
+            self._instr.clear()
+        except Exception as exc:
+            log.warning(f'SMU emergency shutdown error: {exc}')
+
     # ------ TSP (2636B / 2604B) ------
 
     def _measure_vth_tsp(
@@ -199,20 +218,26 @@ class KeithleySMU:
     ) -> Optional[float]:
         """Vth measurement via Lua/TSP scripting (2636B, 2604B)."""
         smu = f'smu{channel}'  # e.g. 'smua' or 'smub'
+        completed = False
+        try:
+            self._write(f'{smu}.reset()')
+            self._write(f'{smu}.source.func = {smu}.OUTPUT_DCAMPS')
+            self._write(f'{smu}.source.leveli = {force_current_a:.6e}')
+            self._write(f'{smu}.source.limitv = {compliance_voltage_v:.4f}')
+            self._write(f'{smu}.measure.autorangev = {smu}.AUTORANGE_ON')
+            self._write(f'{smu}.source.output = {smu}.OUTPUT_ON')
 
-        self._write(f'{smu}.reset()')
-        self._write(f'{smu}.source.func = {smu}.OUTPUT_DCAMPS')
-        self._write(f'{smu}.source.leveli = {force_current_a:.6e}')
-        self._write(f'{smu}.source.limitv = {compliance_voltage_v:.4f}')
-        self._write(f'{smu}.measure.autorangev = {smu}.AUTORANGE_ON')
-        self._write(f'{smu}.source.output = {smu}.OUTPUT_ON')
+            # Allow the source to settle
+            time.sleep(0.1)
 
-        # Allow the source to settle
-        time.sleep(0.1)
-
-        raw = self._query(f'print({smu}.measure.v())')
-        self._write(f'{smu}.source.output = {smu}.OUTPUT_OFF')
-        self._write(f'{smu}.reset()')
+            raw = self._query(f'print({smu}.measure.v())')
+            completed = True
+        finally:
+            if completed:
+                self._write(f'{smu}.source.output = {smu}.OUTPUT_OFF')
+                self._write(f'{smu}.reset()')
+            else:
+                self.emergency_shutdown()
 
         try:
             return float(raw)
@@ -334,6 +359,7 @@ class KeithleySMU:
                 self._write(':OUTP OFF')
         except Exception as exc:
             log.warning(f'SMU precondition voltage error: {exc}')
+            self.emergency_shutdown()
 
     def measure_vth_ramp(
         self,
@@ -425,6 +451,7 @@ class KeithleySMU:
                 )
         except Exception as exc:
             log.error(f'SMU measure_vth_ramp error: {exc}')
+            self.emergency_shutdown()
             return None
 
     def _is_pyvisa_py_backend(self) -> bool:
@@ -479,7 +506,7 @@ class KeithleySMU:
         drain_channel = 'b' if gate_channel == 'a' else 'a'
         gate = f'smu{gate_channel}'
         drain = f'smu{drain_channel}'
-        source_limit_i = max(abs(threshold_i) * 100.0, 10e-3)
+        source_limit_i = max(abs(threshold_i) * 3.0, 10e-3)
         script = (
             f'{gate}.reset() {drain}.reset() '
             f'{gate}.source.func = {gate}.OUTPUT_DCVOLTS '
@@ -613,7 +640,8 @@ class KeithleySMU:
         drain_channel = 'b' if gate_channel == 'a' else 'a'
         gate = f'smu{gate_channel}'
         drain = f'smu{drain_channel}'
-        source_limit_i = max(abs(threshold_i) * 100.0, 10e-3)
+        source_limit_i = max(abs(threshold_i) * 3, 0.01)
+        log.info(f'Source limit: {source_limit_i} A')
         try:
             # Do not upload a multiline TSP script here.  Some VISA backends
             # used on Raspberry Pi do not preserve the script-upload command
@@ -644,6 +672,7 @@ class KeithleySMU:
                 raw = self._query(f'print({drain}.measure.i())')
                 try:
                     current = float(raw)
+                    log.debug(f'Voltage: {v} V, Current: {current} A')
                 except ValueError:
                     log.error(f'SMU TSP ramp: unexpected current response: {raw!r}')
                     return None
