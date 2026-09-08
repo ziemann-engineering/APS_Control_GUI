@@ -875,9 +875,9 @@ class GateStressTest(Procedure):
         'Batch Duration', units='min',
         default=60.0, minimum=0.1, maximum=1440.0,
     )
-    vth_interval_min = IntegerParameter(
+    vth_interval_min = FloatParameter(
         'Vth Measurement Interval', units='min',
-        default=360, minimum=5, maximum=10080,
+        default=360, minimum=0.1, maximum=10080,
     )
     pre_start_vth = BooleanParameter(
         'Pre-run Vth Measurement', default=True,
@@ -1030,6 +1030,75 @@ class GateStressTest(Procedure):
     # Lifecycle
     # -----------------------------------------------------------------------
 
+    def measure_vth_once(self) -> Dict[int, float]:
+        """Measure Vth for all configured DUTs without starting a stress run."""
+        from hardware.gss_controller import GSSController
+        from hardware.keithley_2636 import KeithleySMU
+        from hardware.shared_resources import shared_hardware
+
+        self._apply_connection_parameters()
+        gss_info = _DEVICE_REGISTRY.get(self.gss_serial, {})
+        smu_info = _DEVICE_REGISTRY.get(self.smu_serial, {})
+        gss_port = gss_info.get('port', self.gss_serial)
+        smu_resource = smu_info.get('resource', self.smu_serial)
+        if not gss_port:
+            raise ValueError('A GSS controller must be selected')
+        if not smu_resource:
+            raise ValueError('A Keithley SMU must be selected')
+
+        cfg = ControllerConfig(
+            id=self.gss_serial or gss_port,
+            port=gss_port,
+            gss_serial=self.gss_serial,
+            num_duts=int(self.num_duts),
+            vth_method=self.vth_method,
+            vth_current_ma=float(self.vth_current_ma),
+            vth_precond_voltage=float(self.vth_precond_voltage),
+            vth_ramp_start_voltage=float(self.vth_ramp_start_voltage),
+            vth_ramp_stop_voltage=float(self.vth_ramp_stop_voltage),
+            vth_ramp_step_voltage=float(self.vth_ramp_step_voltage),
+            vth_ramp_fine_step_voltage=float(self.vth_ramp_fine_step_voltage),
+            vth_threshold_current=float(self.vth_current_ma) * 1e-3,
+            vth_compliance_voltage=float(self.vth_compliance_voltage),
+        )
+
+        gss_lease = shared_hardware.claim_exclusive('gss', gss_port)
+        smu_lease = None
+        controller = None
+        try:
+            def _connect_smu():
+                smu = KeithleySMU(smu_resource)
+                return smu if smu.connect() else None
+
+            smu_lease = shared_hardware.acquire('smu', smu_resource, _connect_smu)
+            if smu_lease is None:
+                raise RuntimeError(f'Failed to connect to requested SMU {smu_resource}')
+
+            controller = GSSController(gss_port)
+            if not controller.connect():
+                raise RuntimeError(f'Failed to connect to GSS controller on {gss_port}')
+
+            worker = GSSWorker(
+                cfg=cfg,
+                procedure=self,
+                result_queue=queue.Queue(),
+                smu=smu_lease.device,
+                smu_lock=smu_lease.lock,
+            )
+            worker.controller = controller
+            worker._measure_vth_all_duts()
+            return dict(worker.last_vth)
+        finally:
+            if controller is not None:
+                try:
+                    controller.select_dut(0)
+                except Exception as exc:
+                    log.warning('Manual Vth DUT deselection failed: %s', exc)
+                controller.disconnect()
+            if smu_lease is not None:
+                smu_lease.close()
+            gss_lease.close()
+
     def startup(self):
         """Parse configuration, connect all shared hardware."""
         from hardware.shared_resources import shared_hardware
@@ -1063,6 +1132,10 @@ class GateStressTest(Procedure):
         self._last_nas_sync: float = time.monotonic()
         self._sync_thread: Optional[threading.Thread] = None
 
+        self._check_timing_alignment(
+            float(self.batch_duration_min),
+            float(self.vth_interval_min),
+        )
         self._apply_connection_parameters()
 
         # Build the controller config from the individual parameters. Resolve
@@ -1320,6 +1393,27 @@ class GateStressTest(Procedure):
     # -----------------------------------------------------------------------
     # Internal helpers
     # -----------------------------------------------------------------------
+
+    @staticmethod
+    def _check_timing_alignment(batch_duration_min: float, vth_interval_min: float):
+        """Require periodic Vth deadlines to coincide with batch boundaries."""
+        if vth_interval_min < batch_duration_min:
+            raise ValueError(
+                'Vth Measurement Interval must be greater than or equal to '
+                'Batch Duration because Vth is measured only between batches.'
+            )
+
+        batches_per_vth = vth_interval_min / batch_duration_min
+        if not math.isclose(
+            batches_per_vth,
+            round(batches_per_vth),
+            rel_tol=1e-9,
+            abs_tol=1e-9,
+        ):
+            raise ValueError(
+                'Vth Measurement Interval must be an integer multiple of '
+                'Batch Duration because Vth is measured only between batches.'
+            )
 
     def _check_psu_tcu_conflicts(self, configs: List['ControllerConfig']):
         """Raise ValueError if two controllers share a PSU/TCU channel at different setpoints.

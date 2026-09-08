@@ -9,6 +9,7 @@ import os
 import json
 import base64
 import sys
+import threading
 import toml
 from pathlib import Path
 
@@ -144,6 +145,9 @@ class SettingsManager:
 
 class MainWindow(ManagedDockWindow):
 
+    manual_vth_finished = QtCore.pyqtSignal(object)
+    manual_vth_failed = QtCore.pyqtSignal(str)
+
     def __init__(self, startup_config=None):
 
         # Initialize settings manager
@@ -231,6 +235,9 @@ class MainWindow(ManagedDockWindow):
             self._make_inputs_compact()
         except Exception:
             log.debug('Failed to compact input layout', exc_info=True)
+
+        if getattr(procedure_class, 'internal_name', '') == 'Gate_Switching_Stress':
+            self._add_manual_vth_button()
 
         # Clarify which of the several "directory" fields does what, since
         # the toolbar's Results Directory is otherwise easily confused with
@@ -431,6 +438,91 @@ class MainWindow(ManagedDockWindow):
 
         inputs.setLayout(outer)
         inputs._compact_layout_applied = True
+
+    def _add_manual_vth_button(self):
+        """Add an idle-only, one-shot Vth measurement action to the GSS inputs."""
+        self._manual_vth_active = False
+        self.manual_vth_button = QtWidgets.QPushButton('Measure Vth now')
+        self.manual_vth_button.setToolTip(
+            'Measure every configured DUT once using the current Vth settings.'
+        )
+        self.manual_vth_button.clicked.connect(self._measure_vth_manually)
+
+        inputs_layout = self.inputs.layout()
+        form_item = inputs_layout.itemAt(0)
+        form = form_item.layout() if form_item is not None else None
+        anchor = getattr(self.inputs, 'post_shutdown_vth', None)
+        if isinstance(form, QtWidgets.QFormLayout) and anchor is not None:
+            row, _role = form.getWidgetPosition(anchor)
+            form.insertRow(row + 1, self.manual_vth_button)
+        else:
+            inputs_layout.addWidget(self.manual_vth_button)
+
+        self.manual_vth_finished.connect(self._manual_vth_succeeded)
+        self.manual_vth_failed.connect(self._manual_vth_errored)
+        self.manager.running.connect(self._update_manual_vth_button)
+        self.manager.finished.connect(self._update_manual_vth_button)
+        self.manager.failed.connect(self._update_manual_vth_button)
+        self.manager.abort_returned.connect(self._update_manual_vth_button)
+
+    def _update_manual_vth_button(self, *_args):
+        if not hasattr(self, 'manual_vth_button'):
+            return
+        self.manual_vth_button.setEnabled(
+            not self._manual_vth_active and not self.manager.is_running()
+        )
+
+    def _measure_vth_manually(self):
+        if self._manual_vth_active or self.manager.is_running():
+            return
+
+        try:
+            procedure = self.make_procedure()
+            params = getattr(procedure.__class__, '_startup_connection_parameters', None)
+            if not params:
+                params = self.startup_config.get('connection_parameters', {})
+            procedure.connection_parameters = params
+            procedure._apply_connection_parameters()
+            if not procedure.gss_serial:
+                raise ValueError('Select a GSS controller first.')
+            if not procedure.smu_serial:
+                raise ValueError('Select a Keithley SMU first.')
+        except Exception as exc:
+            log.error('Manual Vth measurement cannot start: %s', exc)
+            return
+
+        self._manual_vth_active = True
+        self.manual_vth_button.setText('Measuring...')
+        self._update_manual_vth_button()
+
+        def _measure():
+            try:
+                self.manual_vth_finished.emit(procedure.measure_vth_once())
+            except Exception as exc:
+                log.exception('Manual Vth measurement failed')
+                self.manual_vth_failed.emit(str(exc))
+
+        self._manual_vth_thread = threading.Thread(
+            target=_measure,
+            name='Manual-Vth',
+            daemon=True,
+        )
+        self._manual_vth_thread.start()
+
+    def _finish_manual_vth(self):
+        self._manual_vth_active = False
+        self.manual_vth_button.setText('Measure Vth now')
+        self._update_manual_vth_button()
+
+    def _manual_vth_succeeded(self, values):
+        self._finish_manual_vth()
+        lines = [f'DUT {dut}: {vth:.4f} V' for dut, vth in sorted(values.items())]
+        message = '\n'.join(lines) if lines else 'No Vth values were returned.'
+        log.info('Manual Vth measurement: %s', message.replace('\n', ', '))
+
+    def _manual_vth_errored(self, message):
+        self._finish_manual_vth()
+        log.error('Manual Vth measurement failed: %s', message)
 
     def _clarify_directory_labels(self):
         """Make it obvious what each of the two "directory" fields does:

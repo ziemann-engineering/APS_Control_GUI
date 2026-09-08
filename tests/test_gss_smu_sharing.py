@@ -1,7 +1,9 @@
 import queue
 import threading
 
-from procedures.GSS import ControllerConfig, GSSWorker
+import pytest
+
+from procedures.GSS import ControllerConfig, GateStressTest, GSSWorker
 
 
 class FakeProcedure:
@@ -67,6 +69,20 @@ def make_worker(name, smu, smu_lock, events):
     )
     worker.controller = FakeGSSController(name, events)
     return worker
+
+
+def test_timing_rejects_vth_interval_shorter_than_batch():
+    with pytest.raises(ValueError, match='greater than or equal'):
+        GateStressTest._check_timing_alignment(60.0, 30.0)
+
+
+def test_timing_rejects_vth_interval_not_divisible_by_batch():
+    with pytest.raises(ValueError, match='integer multiple'):
+        GateStressTest._check_timing_alignment(60.0, 90.0)
+
+
+def test_timing_accepts_float_intervals_with_clean_batch_multiple():
+    GateStressTest._check_timing_alignment(0.1, 0.3)
 
 
 def test_smu_lock_covers_dut_selection_measurement_and_deselection():
