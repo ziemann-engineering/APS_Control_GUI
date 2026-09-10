@@ -177,17 +177,17 @@ Use these helpers to install the OS-specific prerequisites and then the Python p
 - Windows: `deploy_windows.ps1`
 - Linux / Pi OS: `deploy_pi_os.sh`
 
-The Linux / Pi OS script has two modes:
+The Linux / Pi OS script requires one of two explicit modes:
 
 ```bash
-# First install from a downloaded project folder (default mode)
+# First install from a downloaded project folder
 ./deploy_pi_os.sh setup
 
 # Refresh an existing Git installation and its Python packages
 ./deploy_pi_os.sh update
 ```
 
-`setup` installs `dfu-util`, `python3-pyqt5`, libusb, and PyUSB support through the OS package manager, creates a local virtual environment, and installs the remaining Python dependencies. It also installs a udev rule that allows the logged-in user to access USB instruments with PyVISA/PyUSB; reconnect the USB instruments or reboot after the first setup. In a downloaded archive folder with no `.git` directory, setup initializes a Git checkout and replaces the downloaded project files with the current `main` revision when the repository is reachable; when offline, it continues with the downloaded files. `update` requires a Git checkout and performs no OS-level package or USB configuration changes.
+`setup` installs `dfu-util`, `python3-pyqt5`, libusb, and PyUSB support through the OS package manager, replaces any existing local virtual environment, and installs the Python dependencies into a clean environment. It also installs a udev rule that allows the logged-in user to access USB instruments with PyVISA/PyUSB; reconnect the USB instruments or reboot after the first setup. In a downloaded archive folder with no `.git` directory, setup initializes a Git checkout and replaces the downloaded project files with the current `main` revision when the repository is reachable; when offline, it continues with the downloaded files. `update` requires a Git checkout, reuses its existing virtual environment, and performs no OS-level package or USB configuration changes.
 
 Both Linux deployment modes download the current GSS controller firmware from the `main` branch to `firmware/GSS_CONTROL.bin`. If the download fails, deployment continues and retains any existing local firmware file.
 

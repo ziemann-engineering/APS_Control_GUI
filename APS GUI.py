@@ -18,6 +18,8 @@ os.environ['QT_AUTO_SCREEN_SCALE_FACTOR'] = '0'
 os.environ['QT_ENABLE_HIGHDPI_SCALING'] = '0'
 os.environ['QT_SCALE_FACTOR'] = os.environ.get('APS_QT_SCALE_FACTOR', '1')
 os.environ['QT_FONT_DPI'] = '96'
+os.environ['QT_API'] = 'pyqt5'
+os.environ['PYQTGRAPH_QT_LIB'] = 'PyQt5'
 
 from pymeasure.display.Qt import QtWidgets, QtCore
 from pymeasure.display.windows.managed_dock_window import ManagedDockWindow
@@ -145,8 +147,8 @@ class SettingsManager:
 
 class MainWindow(ManagedDockWindow):
 
-    manual_vth_finished = QtCore.pyqtSignal(object)
-    manual_vth_failed = QtCore.pyqtSignal(str)
+    manual_vth_finished = QtCore.Signal(object)
+    manual_vth_failed = QtCore.Signal(str)
 
     def __init__(self, startup_config=None):
 

@@ -6,15 +6,15 @@ REPO_URL='https://github.com/veloyage/Python-Software.git'
 GSS_FIRMWARE_URL='https://raw.githubusercontent.com/ziemann-engineering/GSS_control_firmware/main/build/GSS_CONTROL.bin'
 GSS_FIRMWARE_PATH='firmware/GSS_CONTROL.bin'
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-MODE=${1:-setup}
+MODE=${1:-}
 
 usage() {
   cat <<'EOF'
-Usage: ./deploy_pi_os.sh [setup|update]
+Usage: ./deploy_pi_os.sh <setup|update>
 
   setup   Prepare a fresh downloaded folder or installation, install Linux and
           USB prerequisites, update project files when Git is available, and
-          install Python dependencies. This is the default.
+          install Python dependencies.
   update  Update an existing Git installation and its Python dependencies only.
 EOF
 }
@@ -24,6 +24,11 @@ case "$MODE" in
   -h|--help|help)
     usage
     exit 0
+    ;;
+  '')
+    echo 'ERROR: Specify setup for a new installation or update for an existing installation.' >&2
+    usage >&2
+    exit 2
     ;;
   *)
     echo "ERROR: Unknown mode '$MODE'."
@@ -114,6 +119,11 @@ echo "Python $py_version detected."
 # ---------------------------------------------------------------------------
 # 4. Create or reuse the virtual environment
 # ---------------------------------------------------------------------------
+if [ "$MODE" = 'setup' ] && [ -d .venv ]; then
+  echo 'Removing the existing virtual environment for a clean setup...'
+  rm -rf .venv
+fi
+
 if [ ! -x ".venv/bin/python" ]; then
   echo 'Creating virtual environment...'
   python3 -m venv --system-site-packages .venv
@@ -175,7 +185,23 @@ fi
 # 8. Smoke-test key imports. If any fail, check if system packages are accessible in the virtual environment.
 # ---------------------------------------------------------------------------
 echo 'Verifying key packages...'
-python -c 'import PyQt5; import pyqtgraph; import pymeasure; import pyvisa'
+python - <<'PY'
+import os
+
+os.environ['QT_API'] = 'pyqt5'
+os.environ['PYQTGRAPH_QT_LIB'] = 'PyQt5'
+
+import PyQt5
+import pymeasure
+import pyqtgraph
+import pyvisa
+from pyqtgraph.Qt import QT_LIB
+from pymeasure.display.Qt import QtCore
+
+print(f'Qt binding: {QT_LIB}')
+if QT_LIB != 'PyQt5' or not hasattr(QtCore, 'Signal'):
+  raise RuntimeError(f'Expected PyQt5 with QtCore.Signal, got {QT_LIB}')
+PY
 
 echo ''
 echo "Linux $MODE complete."
