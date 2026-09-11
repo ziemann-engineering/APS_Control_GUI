@@ -1263,8 +1263,12 @@ class GateStressTest(Procedure):
         for cfg in self._configs:
             if cfg.psu_resource and cfg.psu_resource not in self._psu_pool:
                 resource = cfg.psu_resource
+                device_type = _DEVICE_REGISTRY.get(cfg.psu_serial, {}).get('type')
                 lease = shared_hardware.acquire(
-                    'psu', resource, lambda resource=resource: self._connect_psu(resource)
+                    'psu', resource,
+                    lambda resource=resource, device_type=device_type: self._connect_psu(
+                        resource, device_type
+                    ),
                 )
                 self._psu_leases[resource] = lease
                 self._psu_pool[resource] = lease.device if lease else None
@@ -1695,14 +1699,27 @@ class GateStressTest(Procedure):
             }
 
 
-    def _connect_psu(self, resource: str):
+    def _connect_psu(self, resource: str, device_type: Optional[str] = None):
         """Connect to a PSU and return the driver object, or None on failure."""
         try:
+            if device_type == 'hmc8043':
+                from hardware.rs_hmc8043 import RSHMC8043Controller
+                psu = RSHMC8043Controller(resource)
+                if psu.connect():
+                    log.info(f'PSU connected (HMC8043): {resource}')
+                    return psu
+                log.error(f'Failed to connect to HMC8043 PSU on {resource}')
+                return None
+
             from hardware.rs_nge103 import NGE100
             psu = NGE100(resource)
             if psu.connect():
                 log.info(f'PSU connected: {resource}')
                 return psu
+            if device_type == 'nge103':
+                log.error(f'Failed to connect to NGE103 PSU on {resource}')
+                return None
+
             # Try HMC8043 as fallback
             from hardware.rs_hmc8043 import RSHMC8043Controller
             psu = RSHMC8043Controller(resource)
