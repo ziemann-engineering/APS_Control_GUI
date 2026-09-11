@@ -57,15 +57,12 @@ def test_dut_curves_keep_run_color_and_distinguish_duts(monkeypatch):
 
     monkeypatch.setattr('gss_plotting.DUTResultsCurve', FakeCurve)
 
-    new_dut_curves(FakeWidget(), FakeResults(), 6, pg.intColor(3), 'GSS-12')
+    new_dut_curves(FakeWidget(), FakeResults(), (1, 3, 6), pg.intColor(3), 'GSS-12')
 
     assert [curve['name'] for curve in created] == [
         'CTRL GSS-12, DUT 1',
-        'CTRL GSS-12, DUT 2',
         'CTRL GSS-12, DUT 3',
-        'CTRL GSS-12, DUT 4',
-        'CTRL GSS-12, DUT 5',
         'CTRL GSS-12, DUT 6',
     ]
     assert created[0]['pen'].style() != created[1]['pen'].style()
-    assert created[5]['pen'].color().lightness() > created[0]['pen'].color().lightness()
+    assert created[2]['pen'].color().lightness() > created[0]['pen'].color().lightness()

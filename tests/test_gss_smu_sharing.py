@@ -107,6 +107,44 @@ def test_timing_accepts_float_intervals_with_clean_batch_multiple():
     GateStressTest._check_timing_alignment(0.1, 0.3)
 
 
+@pytest.mark.parametrize(
+    ('value', 'expected'),
+    [
+        ('1,3,5,7', (1, 3, 5, 7)),
+        ('1-3', (1, 2, 3)),
+        ('1-3, 5, 7-8', (1, 2, 3, 5, 7, 8)),
+        (1, (1,)),
+    ],
+)
+def test_parse_duts_accepts_lists_and_ranges(value, expected):
+    assert GateStressTest._parse_duts(value) == expected
+
+
+@pytest.mark.parametrize('value', ['', '0', '9', '3-1', '1,1', 'one'])
+def test_parse_duts_rejects_invalid_selections(value):
+    with pytest.raises(ValueError):
+        GateStressTest._parse_duts(value)
+
+
+def test_vth_measurement_uses_only_selected_duts():
+    events = []
+    smu = BlockingSMU(events)
+    smu.release_measurement.set()
+    worker = GSSWorker(
+        cfg=ControllerConfig(id='GSS-A', port='GSS-A', dut_channels=(1, 3, 5)),
+        procedure=FakeProcedure(),
+        result_queue=queue.Queue(),
+        smu=smu,
+        smu_lock=threading.RLock(),
+    )
+    worker.controller = FakeGSSController('GSS-A', events)
+
+    worker._measure_vth_all_duts()
+
+    assert worker.controller.selected == [1, 3, 5, 0]
+    assert set(worker.last_vth) == {1, 3, 5}
+
+
 def test_smu_lock_covers_dut_selection_measurement_and_deselection():
     events = []
     smu = BlockingSMU(events)

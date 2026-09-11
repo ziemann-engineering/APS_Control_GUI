@@ -342,7 +342,7 @@ class MainWindow(ManagedDockWindow):
                 for curve in new_dut_curves(
                     plot_widget,
                     results,
-                    results.procedure.num_duts,
+                    results.procedure._parse_duts(results.procedure.num_duts),
                     color,
                     controller_id,
                 )

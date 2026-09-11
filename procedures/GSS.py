@@ -114,8 +114,8 @@ class ControllerConfig:
     port: str                        # COM port for GSS controller
     gss_serial: str = ''             # Serial number from ID command
 
-    # DUT count
-    num_duts: int = 1
+    # Selected DUT channels
+    dut_channels: tuple = (1,)
 
     # Switching parameters
     freq_hz: float = 100_000.0
@@ -358,7 +358,7 @@ class GSSWorker:
                     cycles=batch_cycles,
                     freq_hz=self.cfg.freq_hz,
                     duty_cycle=self.cfg.duty_cycle,
-                    dut_channels=range(1, self.cfg.num_duts + 1),
+                    dut_channels=self.cfg.dut_channels,
                     should_stop=self._stop_requested,
                     on_progress=_report_progress,
                 )
@@ -389,7 +389,7 @@ class GSSWorker:
                         cycles=batch_cycles,
                         freq_hz=self.cfg.freq_hz,
                         duty_cycle=self.cfg.duty_cycle,
-                        dut_channels=range(1, self.cfg.num_duts + 1),
+                        dut_channels=self.cfg.dut_channels,
                         should_stop=self._stop_requested,
                         on_progress=_report_progress,
                     )
@@ -460,7 +460,7 @@ class GSSWorker:
         return self._stop_requested()
 
     def _emit_all_rows(self):
-        for dut in range(1, self.cfg.num_duts + 1):
+        for dut in self.cfg.dut_channels:
             self._emit_row(dut=dut)
 
     def _load_checkpoint(self, target_cycles: int):
@@ -660,7 +660,7 @@ class GSSWorker:
             raise RuntimeError('Vth measurement interrupted while waiting for SMU')
 
         try:
-            for dut in range(1, self.cfg.num_duts + 1):
+            for dut in self.cfg.dut_channels:
                 if self._stop_requested():
                     raise RuntimeError('Vth measurement interrupted by stop request')
                 self._select_dut_for_measurement(dut)
@@ -810,9 +810,7 @@ class GateStressTest(Procedure):
 
     gss_serial = ListParameter('GSS Controller SN', choices=[''])
 
-    num_duts = IntegerParameter(
-        'DUT Count', default=1, minimum=1, maximum=8,
-    )
+    num_duts = Parameter('DUTs', default='1')
 
     # ---- Switching --------------------------------------------------------
 
@@ -1058,6 +1056,37 @@ class GateStressTest(Procedure):
     # Lifecycle
     # -----------------------------------------------------------------------
 
+    @staticmethod
+    def _parse_duts(value) -> tuple:
+        """Parse comma-separated DUT channels and inclusive ranges."""
+        channels = []
+        for item in str(value).split(','):
+            item = item.strip()
+            if not item:
+                raise ValueError('DUTs must be a list such as 1,3,5,7 or a range such as 1-3')
+            if '-' in item:
+                parts = [part.strip() for part in item.split('-')]
+                if len(parts) != 2:
+                    raise ValueError(f'Invalid DUT range: {item}')
+                try:
+                    start, stop = (int(part) for part in parts)
+                except ValueError as exc:
+                    raise ValueError(f'Invalid DUT range: {item}') from exc
+                if start > stop:
+                    raise ValueError(f'DUT range must be ascending: {item}')
+                channels.extend(range(start, stop + 1))
+            else:
+                try:
+                    channels.append(int(item))
+                except ValueError as exc:
+                    raise ValueError(f'Invalid DUT channel: {item}') from exc
+
+        if any(channel < 1 or channel > 8 for channel in channels):
+            raise ValueError('DUT channels must be between 1 and 8')
+        if len(set(channels)) != len(channels):
+            raise ValueError('DUT channels must not contain duplicates')
+        return tuple(channels)
+
     def measure_vth_once(self) -> Dict[int, float]:
         """Measure Vth for all configured DUTs without starting a stress run."""
         from hardware.gss_controller import GSSController
@@ -1078,7 +1107,7 @@ class GateStressTest(Procedure):
             id=self.gss_serial or gss_port,
             port=gss_port,
             gss_serial=self.gss_serial,
-            num_duts=int(self.num_duts),
+            dut_channels=self._parse_duts(self.num_duts),
             vth_method=self.vth_method,
             vth_current_ma=float(self.vth_current_ma),
             vth_precond_voltage=float(self.vth_precond_voltage),
@@ -1181,7 +1210,7 @@ class GateStressTest(Procedure):
             id=controller_id,
             port=gss_port,
             gss_serial=self.gss_serial,
-            num_duts=self.num_duts,
+            dut_channels=self._parse_duts(self.num_duts),
             freq_hz=self.freq_hz,
             duty_cycle=self.duty_cycle,
             vth_method=self.vth_method,
