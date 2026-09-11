@@ -175,6 +175,7 @@ class GSSWorker:
         tcu=None,
         tcu_lock: Optional[threading.Lock] = None,
         checkpoint_path: str = '',
+        standalone: bool = False,
     ):
         self.cfg = cfg
         self.procedure = procedure
@@ -190,6 +191,8 @@ class GSSWorker:
         self.controller = None
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        if standalone:
+            self.procedure.should_stop = self._stop_event.is_set
 
         # The firmware's GSS_cycles counter accumulates across ALL batches
         # since the controller was last powered on/reset -- it never resets
@@ -1109,6 +1112,7 @@ class GateStressTest(Procedure):
                 result_queue=queue.Queue(),
                 smu=smu_lease.device,
                 smu_lock=smu_lease.lock,
+                standalone=True,
             )
             worker.controller = controller
             worker._measure_vth_all_duts()

@@ -72,6 +72,27 @@ def make_worker(name, smu, smu_lock, events):
     return worker
 
 
+def test_standalone_worker_supplies_procedure_stop_hook():
+    class StandaloneProcedure(FakeProcedure):
+        @staticmethod
+        def should_stop():
+            raise NotImplementedError
+
+    procedure = StandaloneProcedure()
+    worker = GSSWorker(
+        cfg=ControllerConfig(id='GSS-A', port='GSS-A'),
+        procedure=procedure,
+        result_queue=queue.Queue(),
+        smu=object(),
+        smu_lock=threading.Lock(),
+        standalone=True,
+    )
+
+    assert procedure.should_stop() is False
+    worker._stop_event.set()
+    assert procedure.should_stop() is True
+
+
 def test_timing_rejects_vth_interval_shorter_than_batch():
     with pytest.raises(ValueError, match='greater than or equal'):
         GateStressTest._check_timing_alignment(60.0, 30.0)
