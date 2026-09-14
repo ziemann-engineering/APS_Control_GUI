@@ -8,13 +8,22 @@ from hardware.rs_hmc8043 import RSHMC8043Controller
 class FakePSU:
     def __init__(self):
         self.commands = []
+        self.selected_channel = None
 
     def write(self, command):
         self.commands.append(command)
+        if command.startswith('INSTrument:NSELect '):
+            self.selected_channel = int(command.rsplit(' ', 1)[1])
 
     def query(self, command):
         self.commands.append(command)
-        return 'ON'
+        if command == 'INSTrument:NSELect?':
+            return str(self.selected_channel)
+        if command == '*OPC?':
+            return '1'
+        if command == 'OUTPut:STATe?':
+            return 'ON'
+        raise AssertionError(f'Unexpected query: {command}')
 
 
 def test_measure_supply_accepts_zero_and_signed_values():
@@ -126,7 +135,9 @@ def test_hmc8043_selects_channel_before_changing_output_state():
 
     assert controller.psu.commands == [
         'INSTrument:NSELect 2',
+        'INSTrument:NSELect?',
         'OUTPut:STATe ON',
+        '*OPC?',
     ]
 
 
@@ -138,5 +149,6 @@ def test_hmc8043_selects_channel_before_querying_output_state():
     assert controller.get_output_state(2) is True
     assert controller.psu.commands == [
         'INSTrument:NSELect 2',
+        'INSTrument:NSELect?',
         'OUTPut:STATe?',
     ]

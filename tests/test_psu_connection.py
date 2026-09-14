@@ -1,6 +1,7 @@
 from unittest.mock import Mock, patch
 
 from hardware.rs_nge103 import NGE100
+from procedures.GSS import GateStressTest
 
 
 def test_nge100_retries_transient_visa_open_error():
@@ -19,3 +20,20 @@ def test_nge100_retries_transient_visa_open_error():
     sleep.assert_called_once_with(NGE100.CONNECT_RETRY_DELAY_S)
     assert psu.psu is resource
     resource.query.assert_called_once_with('*IDN?')
+
+
+def test_gss_connects_discovered_hmc8043_without_probing_nge103():
+    hmc = Mock()
+    hmc.connect.return_value = True
+
+    with patch('hardware.rs_hmc8043.RSHMC8043Controller', return_value=hmc) as hmc_class, patch(
+        'hardware.rs_nge103.NGE100'
+    ) as nge_class:
+        connected = GateStressTest.__new__(GateStressTest)._connect_psu(
+            'USB0::HMC::INSTR', 'hmc8043'
+        )
+
+    assert connected is hmc
+    hmc_class.assert_called_once_with('USB0::HMC::INSTR')
+    hmc.connect.assert_called_once_with()
+    nge_class.assert_not_called()

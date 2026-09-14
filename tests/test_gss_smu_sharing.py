@@ -73,6 +73,27 @@ def make_worker(name, smu, smu_lock, events):
     return worker
 
 
+def test_standalone_worker_supplies_procedure_stop_hook():
+    class StandaloneProcedure(FakeProcedure):
+        @staticmethod
+        def should_stop():
+            raise NotImplementedError
+
+    procedure = StandaloneProcedure()
+    worker = GSSWorker(
+        cfg=ControllerConfig(id='GSS-A', port='GSS-A'),
+        procedure=procedure,
+        result_queue=queue.Queue(),
+        smu=object(),
+        smu_lock=threading.Lock(),
+        standalone=True,
+    )
+
+    assert procedure.should_stop() is False
+    worker._stop_event.set()
+    assert procedure.should_stop() is True
+
+
 def test_timing_rejects_vth_interval_shorter_than_batch():
     with pytest.raises(ValueError, match='greater than or equal'):
         GateStressTest._check_timing_alignment(60.0, 30.0)
@@ -136,6 +157,44 @@ def test_pre_run_vth_does_not_use_pre_vth_wait():
     worker._run_batches()
 
     assert events == ['measure', 'GSS-A-switch']
+
+
+@pytest.mark.parametrize(
+    ('value', 'expected'),
+    [
+        ('1,3,5,7', (1, 3, 5, 7)),
+        ('1-3', (1, 2, 3)),
+        ('1-3, 5, 7-8', (1, 2, 3, 5, 7, 8)),
+        (1, (1,)),
+    ],
+)
+def test_parse_duts_accepts_lists_and_ranges(value, expected):
+    assert GateStressTest._parse_duts(value) == expected
+
+
+@pytest.mark.parametrize('value', ['', '0', '9', '3-1', '1,1', 'one'])
+def test_parse_duts_rejects_invalid_selections(value):
+    with pytest.raises(ValueError):
+        GateStressTest._parse_duts(value)
+
+
+def test_vth_measurement_uses_only_selected_duts():
+    events = []
+    smu = BlockingSMU(events)
+    smu.release_measurement.set()
+    worker = GSSWorker(
+        cfg=ControllerConfig(id='GSS-A', port='GSS-A', dut_channels=(1, 3, 5)),
+        procedure=FakeProcedure(),
+        result_queue=queue.Queue(),
+        smu=smu,
+        smu_lock=threading.RLock(),
+    )
+    worker.controller = FakeGSSController('GSS-A', events)
+
+    worker._measure_vth_all_duts()
+
+    assert worker.controller.selected == [1, 3, 5, 0]
+    assert set(worker.last_vth) == {1, 3, 5}
 
 
 def test_smu_lock_covers_dut_selection_measurement_and_deselection():

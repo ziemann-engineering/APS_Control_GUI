@@ -114,8 +114,8 @@ class ControllerConfig:
     port: str                        # COM port for GSS controller
     gss_serial: str = ''             # Serial number from ID command
 
-    # DUT count
-    num_duts: int = 1
+    # Selected DUT channels
+    dut_channels: tuple = (1,)
 
     # Switching parameters
     freq_hz: float = 100_000.0
@@ -175,6 +175,7 @@ class GSSWorker:
         tcu=None,
         tcu_lock: Optional[threading.Lock] = None,
         checkpoint_path: str = '',
+        standalone: bool = False,
     ):
         self.cfg = cfg
         self.procedure = procedure
@@ -190,6 +191,8 @@ class GSSWorker:
         self.controller = None
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        if standalone:
+            self.procedure.should_stop = self._stop_event.is_set
 
         # The firmware's GSS_cycles counter accumulates across ALL batches
         # since the controller was last powered on/reset -- it never resets
@@ -362,7 +365,7 @@ class GSSWorker:
                     cycles=batch_cycles,
                     freq_hz=self.cfg.freq_hz,
                     duty_cycle=self.cfg.duty_cycle,
-                    dut_channels=range(1, self.cfg.num_duts + 1),
+                    dut_channels=self.cfg.dut_channels,
                     should_stop=self._stop_requested,
                     on_progress=_report_progress,
                 )
@@ -393,7 +396,7 @@ class GSSWorker:
                         cycles=batch_cycles,
                         freq_hz=self.cfg.freq_hz,
                         duty_cycle=self.cfg.duty_cycle,
-                        dut_channels=range(1, self.cfg.num_duts + 1),
+                        dut_channels=self.cfg.dut_channels,
                         should_stop=self._stop_requested,
                         on_progress=_report_progress,
                     )
@@ -464,7 +467,7 @@ class GSSWorker:
         return self._stop_requested()
 
     def _emit_all_rows(self):
-        for dut in range(1, self.cfg.num_duts + 1):
+        for dut in self.cfg.dut_channels:
             self._emit_row(dut=dut)
 
     def _load_checkpoint(self, target_cycles: int):
@@ -664,7 +667,7 @@ class GSSWorker:
             raise RuntimeError('Vth measurement interrupted while waiting for SMU')
 
         try:
-            for dut in range(1, self.cfg.num_duts + 1):
+            for dut in self.cfg.dut_channels:
                 if self._stop_requested():
                     raise RuntimeError('Vth measurement interrupted by stop request')
                 self._select_dut_for_measurement(dut)
@@ -814,9 +817,7 @@ class GateStressTest(Procedure):
 
     gss_serial = ListParameter('GSS Controller SN', choices=[''])
 
-    num_duts = IntegerParameter(
-        'DUT Count', default=1, minimum=1, maximum=8,
-    )
+    num_duts = Parameter('DUTs', default='1')
 
     # ---- Switching --------------------------------------------------------
 
@@ -1067,6 +1068,37 @@ class GateStressTest(Procedure):
     # Lifecycle
     # -----------------------------------------------------------------------
 
+    @staticmethod
+    def _parse_duts(value) -> tuple:
+        """Parse comma-separated DUT channels and inclusive ranges."""
+        channels = []
+        for item in str(value).split(','):
+            item = item.strip()
+            if not item:
+                raise ValueError('DUTs must be a list such as 1,3,5,7 or a range such as 1-3')
+            if '-' in item:
+                parts = [part.strip() for part in item.split('-')]
+                if len(parts) != 2:
+                    raise ValueError(f'Invalid DUT range: {item}')
+                try:
+                    start, stop = (int(part) for part in parts)
+                except ValueError as exc:
+                    raise ValueError(f'Invalid DUT range: {item}') from exc
+                if start > stop:
+                    raise ValueError(f'DUT range must be ascending: {item}')
+                channels.extend(range(start, stop + 1))
+            else:
+                try:
+                    channels.append(int(item))
+                except ValueError as exc:
+                    raise ValueError(f'Invalid DUT channel: {item}') from exc
+
+        if any(channel < 1 or channel > 8 for channel in channels):
+            raise ValueError('DUT channels must be between 1 and 8')
+        if len(set(channels)) != len(channels):
+            raise ValueError('DUT channels must not contain duplicates')
+        return tuple(channels)
+
     def measure_vth_once(self) -> Dict[int, float]:
         """Measure Vth for all configured DUTs without starting a stress run."""
         from hardware.gss_controller import GSSController
@@ -1087,7 +1119,7 @@ class GateStressTest(Procedure):
             id=self.gss_serial or gss_port,
             port=gss_port,
             gss_serial=self.gss_serial,
-            num_duts=int(self.num_duts),
+            dut_channels=self._parse_duts(self.num_duts),
             vth_method=self.vth_method,
             vth_current_ma=float(self.vth_current_ma),
             vth_precond_voltage=float(self.vth_precond_voltage),
@@ -1121,6 +1153,7 @@ class GateStressTest(Procedure):
                 result_queue=queue.Queue(),
                 smu=smu_lease.device,
                 smu_lock=smu_lease.lock,
+                standalone=True,
             )
             worker.controller = controller
             worker._measure_vth_all_duts()
@@ -1190,7 +1223,7 @@ class GateStressTest(Procedure):
             id=controller_id,
             port=gss_port,
             gss_serial=self.gss_serial,
-            num_duts=self.num_duts,
+            dut_channels=self._parse_duts(self.num_duts),
             freq_hz=self.freq_hz,
             duty_cycle=self.duty_cycle,
             vth_method=self.vth_method,
@@ -1243,8 +1276,12 @@ class GateStressTest(Procedure):
         for cfg in self._configs:
             if cfg.psu_resource and cfg.psu_resource not in self._psu_pool:
                 resource = cfg.psu_resource
+                device_type = _DEVICE_REGISTRY.get(cfg.psu_serial, {}).get('type')
                 lease = shared_hardware.acquire(
-                    'psu', resource, lambda resource=resource: self._connect_psu(resource)
+                    'psu', resource,
+                    lambda resource=resource, device_type=device_type: self._connect_psu(
+                        resource, device_type
+                    ),
                 )
                 self._psu_leases[resource] = lease
                 self._psu_pool[resource] = lease.device if lease else None
@@ -1680,14 +1717,27 @@ class GateStressTest(Procedure):
             }
 
 
-    def _connect_psu(self, resource: str):
+    def _connect_psu(self, resource: str, device_type: Optional[str] = None):
         """Connect to a PSU and return the driver object, or None on failure."""
         try:
+            if device_type == 'hmc8043':
+                from hardware.rs_hmc8043 import RSHMC8043Controller
+                psu = RSHMC8043Controller(resource)
+                if psu.connect():
+                    log.info(f'PSU connected (HMC8043): {resource}')
+                    return psu
+                log.error(f'Failed to connect to HMC8043 PSU on {resource}')
+                return None
+
             from hardware.rs_nge103 import NGE100
             psu = NGE100(resource)
             if psu.connect():
                 log.info(f'PSU connected: {resource}')
                 return psu
+            if device_type == 'nge103':
+                log.error(f'Failed to connect to NGE103 PSU on {resource}')
+                return None
+
             # Try HMC8043 as fallback
             from hardware.rs_hmc8043 import RSHMC8043Controller
             psu = RSHMC8043Controller(resource)

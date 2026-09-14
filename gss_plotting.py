@@ -21,7 +21,7 @@ class DUTResultsCurve(ResultsCurve):
         self.setData(dut_data[self.x].to_numpy(), dut_data[self.y].to_numpy())
 
 
-def new_dut_curves(widget, results, dut_count, run_color, controller_id):
+def new_dut_curves(widget, results, dut_channels, run_color, controller_id):
     """Create labelled DUT curves using one base color for each GSS run."""
     if widget.plot.legend is None:
         widget.plot.addLegend()
@@ -34,7 +34,7 @@ def new_dut_curves(widget, results, dut_count, run_color, controller_id):
         QtCore.Qt.PenStyle.DashDotDotLine,
     )
     curves = []
-    for dut in range(1, dut_count + 1):
+    for dut in dut_channels:
         style_index = (dut - 1) % len(styles)
         color = run_color.lighter(135) if dut > len(styles) else run_color
         curve = DUTResultsCurve(

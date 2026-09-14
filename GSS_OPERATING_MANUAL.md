@@ -36,7 +36,7 @@ Only trained personnel should connect or change DUT, PSU, or fixture wiring. Bef
 3. Confirm detected hardware and use **Test** for every selected device. Apply an offered GSS firmware update before the run if required.
 4. Launch the main window and select the GSS controller and any SMU, PSU, and TCU by serial number.
 5. Set the stress, measurement, supply, temperature, logging, and storage parameters; choose a unique local output filename and directory.
-6. Check fixture wiring, rail channels, setpoints, and DUT count against the physical setup.
+6. Check fixture wiring, rail channels, setpoints, and selected DUTs against the physical setup.
 7. Select **Start**. The procedure configures enabled PSUs and TCUs, validates setup where supported, then begins switching batches.
 8. Monitor the live plot, results table, `Status`, and `Last Error` columns. Preserve the local CSV and checkpoint throughout a long test.
 9. At completion, or when stopping is necessary, select **Abort** and wait for cleanup to finish before handling hardware.
@@ -60,7 +60,7 @@ All entries below are set in the GSS New Experiment/Input panel. Device lists ar
 | Group | Parameter | Default | Allowed values | Effect |
 |---|---|---:|---|---|
 | Controller | GSS Controller SN | none | Discovered controller serial | Selects the required controller. |
-| Controller | DUT Count | 1 | 1 to 8 | Number of fixture DUT channels switched and measured. |
+| Controller | DUTs | `1` | Channels 1 to 8 | Comma-separated channels (`1,3,5,7`) and inclusive ranges (`1-3`) are accepted. |
 | Controller | Switching Frequency | 100000 Hz | 1000 to 10000000 Hz | Gate-switching frequency. |
 | Controller | Duty Cycle | 0.5 | 0.01 to 0.99 | Active fraction of each cycle. |
 | SMU | SMU SN | none | Discovered Keithley serial | Enables Vth measurement. |

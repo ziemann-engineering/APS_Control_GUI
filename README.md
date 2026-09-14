@@ -513,7 +513,7 @@ Below the file field, a directory chooser (labeled **Local Directory**) sets the
 |---|---|---|---|---|
 | SMU | — | discovered serials | — | Serial number of the Keithley SMU to use |
 | GSS Controller | — | discovered serials | — | Serial number of the GSS controller for this DUT group |
-| DUT Count | — | 1 – 8 | 1 | Number of DUTs connected to this GSS controller |
+| DUTs | — | Channels 1 – 8 | `1` | DUT channels to use; accepts lists (`1,3,5,7`) and inclusive ranges (`1-3`) |
 | Switching Frequency | Hz | 1 000 – 10 000 000 | 100 000 | Gate switching frequency |
 | Duty Cycle | — | 0.01 – 0.99 | 0.5 | Gate switching duty cycle |
 | Vth Method | — | force_current / ramp_voltage | force_current | Method used to measure threshold voltage; `ramp_voltage` runs configurable coarse and fine passes, each with pre-bias |
@@ -583,7 +583,7 @@ The hourly sync runs in a background thread.  If the NAS is unreachable the warn
 
 3. **Configure parameters:**
    - Select the correct devices from the dropdowns (SMU, GSS Controller, PSU, TCU).
-   - Set **DUT Count** to the number of devices connected to this controller.
+   - Set **DUTs** to the fixture channels to use, for example `1,3,5,7` or `1-3`.
    - Set the switching **Frequency** and **Duty Cycle** for the desired gate stress.
    - Set **V_on** and **V_off** to the gate driver voltage levels.
    - If using temperature control, set **Temperature** and the correct **TCU Channel**.
