@@ -276,6 +276,7 @@ class GSSWorker:
         target_cycles = int(self.procedure.target_cycles)
         batch_duration_s = max(1.0, float(self.procedure.batch_duration_min) * 60.0)
         vth_interval = float(self.procedure.vth_interval_min) * 60.0
+        pre_vth_wait = float(self.procedure.pre_vth_wait_min) * 60.0
         last_vth_time = time.time()
 
         self._load_checkpoint(target_cycles)
@@ -314,7 +315,13 @@ class GSSWorker:
             self._save_checkpoint(target_cycles)
             self._emit_all_rows()
 
-            if self.smu is not None and time.time() - last_vth_time >= vth_interval:
+            if (self.smu is not None
+                    and time.time() - last_vth_time >= vth_interval - pre_vth_wait):
+                if pre_vth_wait > 0:
+                    self.status = 'pre-Vth wait'
+                    self._emit_all_rows()
+                    if self._sleep_interruptible(pre_vth_wait):
+                        break
                 self.status = 'measuring Vth'
                 if self._run_with_retries(self._measure_vth_all_duts, 'Vth measurement'):
                     last_vth_time = time.time()
@@ -904,6 +911,10 @@ class GateStressTest(Procedure):
         'Vth Measurement Interval', units='min',
         default=360, minimum=0.1, maximum=10080,
     )
+    pre_vth_wait_min = FloatParameter(
+        'Pre-Vth Wait', units='min',
+        default=5.0, minimum=0.0, maximum=1440.0,
+    )
     pre_start_vth = BooleanParameter(
         'Pre-run Vth Measurement', default=True,
     )
@@ -972,6 +983,7 @@ class GateStressTest(Procedure):
         'vth_ramp_fine_step_voltage',
         'vth_compliance_voltage',
         'vth_interval_min',
+        'pre_vth_wait_min',
         'pre_start_vth',
         'post_shutdown_vth',
         # ---- PSU (Gate Drive) ----
@@ -1160,6 +1172,7 @@ class GateStressTest(Procedure):
         self._check_timing_alignment(
             float(self.batch_duration_min),
             float(self.vth_interval_min),
+            float(self.pre_vth_wait_min),
         )
         self._apply_connection_parameters()
 
@@ -1420,15 +1433,20 @@ class GateStressTest(Procedure):
     # -----------------------------------------------------------------------
 
     @staticmethod
-    def _check_timing_alignment(batch_duration_min: float, vth_interval_min: float):
-        """Require periodic Vth deadlines to coincide with batch boundaries."""
-        if vth_interval_min < batch_duration_min:
+    def _check_timing_alignment(
+        batch_duration_min: float,
+        vth_interval_min: float,
+        pre_vth_wait_min: float = 0.0,
+    ):
+        """Require the pre-Vth wait to begin at a batch boundary."""
+        switching_duration_min = vth_interval_min - pre_vth_wait_min
+        if switching_duration_min < batch_duration_min:
             raise ValueError(
-                'Vth Measurement Interval must be greater than or equal to '
-                'Batch Duration because Vth is measured only between batches.'
+                'Vth Measurement Interval minus Pre-Vth Wait must be greater '
+                'than or equal to Batch Duration.'
             )
 
-        batches_per_vth = vth_interval_min / batch_duration_min
+        batches_per_vth = switching_duration_min / batch_duration_min
         if not math.isclose(
             batches_per_vth,
             round(batches_per_vth),
@@ -1436,8 +1454,8 @@ class GateStressTest(Procedure):
             abs_tol=1e-9,
         ):
             raise ValueError(
-                'Vth Measurement Interval must be an integer multiple of '
-                'Batch Duration because Vth is measured only between batches.'
+                'Vth Measurement Interval minus Pre-Vth Wait must be an '
+                'integer multiple of Batch Duration.'
             )
 
     def _check_psu_tcu_conflicts(self, configs: List['ControllerConfig']):

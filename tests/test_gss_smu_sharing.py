@@ -12,6 +12,7 @@ class FakeProcedure:
     target_cycles = 1
     batch_duration_min = 1
     vth_interval_min = 60
+    pre_vth_wait_min = 0
     pre_start_vth = False
     post_shutdown_vth = False
     hardware_retry_count = 1
@@ -84,6 +85,57 @@ def test_timing_rejects_vth_interval_not_divisible_by_batch():
 
 def test_timing_accepts_float_intervals_with_clean_batch_multiple():
     GateStressTest._check_timing_alignment(0.1, 0.3)
+
+
+def test_timing_accepts_pre_vth_wait_after_complete_batches():
+    GateStressTest._check_timing_alignment(60.0, 65.0, 5.0)
+
+
+def test_timing_rejects_wait_that_does_not_start_on_batch_boundary():
+    with pytest.raises(ValueError, match='minus Pre-Vth Wait'):
+        GateStressTest._check_timing_alignment(60.0, 64.0, 5.0)
+
+
+def test_periodic_vth_waits_after_switching_before_measurement():
+    events = []
+    procedure = FakeProcedure()
+    procedure.vth_interval_min = 5
+    procedure.pre_vth_wait_min = 5
+    worker = GSSWorker(
+        cfg=ControllerConfig(id='GSS-A', port='GSS-A'),
+        procedure=procedure,
+        result_queue=queue.Queue(),
+        smu=object(),
+        smu_lock=threading.RLock(),
+    )
+    worker.controller = FakeGSSController('GSS-A', events)
+    worker._sleep_interruptible = lambda seconds: events.append(('wait', seconds)) or False
+    worker._measure_vth_all_duts = lambda: events.append('measure')
+
+    worker._run_batches()
+
+    assert events == ['GSS-A-switch', ('wait', 300.0), 'measure']
+
+
+def test_pre_run_vth_does_not_use_pre_vth_wait():
+    events = []
+    procedure = FakeProcedure()
+    procedure.pre_start_vth = True
+    procedure.pre_vth_wait_min = 5
+    worker = GSSWorker(
+        cfg=ControllerConfig(id='GSS-A', port='GSS-A'),
+        procedure=procedure,
+        result_queue=queue.Queue(),
+        smu=object(),
+        smu_lock=threading.RLock(),
+    )
+    worker.controller = FakeGSSController('GSS-A', events)
+    worker._sleep_interruptible = lambda seconds: events.append(('wait', seconds)) or False
+    worker._measure_vth_all_duts = lambda: events.append('measure')
+
+    worker._run_batches()
+
+    assert events == ['measure', 'GSS-A-switch']
 
 
 def test_smu_lock_covers_dut_selection_measurement_and_deselection():

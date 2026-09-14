@@ -532,6 +532,7 @@ Below the file field, a directory chooser (labeled **Local Directory**) sets the
 | TCU Channel | — | 1 – 4 | 1 | TCU channel index (1-based) |
 | Temperature | °C | −40 – 250 | 25.0 | Target DUT temperature |
 | Vth Measurement Interval | min | 5 – 1440 | 60 | Period between Vth measurements |
+| Pre-Vth Wait | min | 0 – 1440 | 5 | Quiet time after the final switching batch and before each periodic Vth measurement |
 | NAS Backup Directory | — | — | *(empty)* | Optional destination that mirrors the Results file, typically a NAS mount point — see [Data Storage](#gss-data-storage) |
 
 #### Data Output (per emitted row, per DUT)

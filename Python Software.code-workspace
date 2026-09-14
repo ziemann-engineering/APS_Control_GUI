@@ -19,5 +19,7 @@
 			"path": "../../TCUv2/Software/TCUv2"
 		}
 	],
-	"settings": {}
+	"settings": {
+		"circuitpythonsync.drivepath": "I:"
+	}
 }

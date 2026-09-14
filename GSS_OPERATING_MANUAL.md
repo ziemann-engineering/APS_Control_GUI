@@ -46,7 +46,7 @@ Only trained personnel should connect or change DUT, PSU, or fixture wiring. Bef
 ### Operating Behavior
 
 - **Switching:** The controller receives batches of gate cycles. Batch length is calculated from switching frequency and batch duration, limited by target cycles. Progress within a batch is estimated; the controller reports its accumulated count after a batch.
-- **Vth measurement:** With an SMU selected, every DUT may be measured before the run, periodically between batches, and after shutdown. The controller selects each DUT and the SMU is locked so parallel GSS runs cannot use it concurrently.
+- **Vth measurement:** With an SMU selected, every DUT may be measured before the run, periodically between batches, and after shutdown. Before each periodic measurement, switching remains off for the configured Pre-Vth Wait. The controller selects each DUT and the SMU is locked so parallel GSS runs cannot use it concurrently.
 - **Gate rails and temperature:** An enabled PSU has selected positive and negative channels set to the requested absolute voltage with a 1 A current limit. An enabled TCU is set to its selected channel and temperature. Shared-channel requests must be compatible.
 - **Data and recovery:** One row per DUT contains timestamp, controller, DUT, cycles, Vth, temperature, positive/negative rail values, batch number, status, and last error. Checkpoints are updated after batches and Vth measurements.
 - **Retry handling:** Hardware actions retry by the configured count and delay. Repeated failure changes status to `waiting for operator` and retries at the operator-retry interval until recovery or abort.
@@ -73,6 +73,7 @@ All entries below are set in the GSS New Experiment/Input panel. Device lists ar
 | SMU | Vth Ramp Fine Step Size | 0.001 V | 0 to 10 V | Fine increment; 0 skips refinement. If coarse is 0, this is the full-range step. |
 | SMU | Vth Compliance Voltage | 10.0 V | 0.1 to 30 V | SMU compliance in forced-current mode. |
 | SMU | Vth Measurement Interval | 360 min | 5 to 10080 min | Period between Vth measurements. |
+| SMU | Pre-Vth Wait | 5 min | 0 to 1440 min | Quiet time after the final switching batch and before each periodic Vth measurement. The interval minus this wait must be an integer multiple of Batch Duration. |
 | SMU | Pre-run Vth Measurement | enabled | enabled/disabled | Measure each DUT before switching. |
 | SMU | Post-run Vth Measurement | enabled | enabled/disabled | Measure each DUT after switching or abort. |
 | PSU | PSU SN | none | Discovered NGE103B or HMC8043 serial | Selects external gate-supply PSU. |

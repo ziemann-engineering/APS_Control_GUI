@@ -235,6 +235,7 @@ class MainWindow(ManagedDockWindow):
         # compact for procedures with many parameters.
         try:
             self._make_inputs_compact()
+            self._tighten_input_dock()
         except Exception:
             log.debug('Failed to compact input layout', exc_info=True)
 
@@ -405,7 +406,10 @@ class MainWindow(ManagedDockWindow):
         sections = getattr(procedure_class, 'INPUT_SECTIONS', {}) or {}
 
         first_row = True
+        combined_names = {'post_shutdown_vth'}
         for name in compact_names:
+            if name in combined_names:
+                continue
             widget = getattr(inputs, name, None)
             if widget is None:
                 continue
@@ -416,6 +420,21 @@ class MainWindow(ManagedDockWindow):
                     'font-weight: bold;' if first_row else 'font-weight: bold; margin-top: 8px;'
                 )
                 form.addRow(headline)
+            if name == 'pre_start_vth':
+                post_widget = getattr(inputs, 'post_shutdown_vth', None)
+                if post_widget is not None:
+                    widget.setText('Pre')
+                    post_widget.setText('Post')
+                    vth_toggles = QtWidgets.QWidget()
+                    toggles_layout = QtWidgets.QHBoxLayout(vth_toggles)
+                    toggles_layout.setContentsMargins(0, 0, 0, 0)
+                    toggles_layout.setSpacing(12)
+                    toggles_layout.addWidget(widget)
+                    toggles_layout.addWidget(post_widget)
+                    toggles_layout.addStretch()
+                    form.addRow(vth_toggles)
+                    first_row = False
+                    continue
             label = labels.get(name)
             if label is not None:
                 form.addRow(label, widget)
@@ -441,6 +460,30 @@ class MainWindow(ManagedDockWindow):
         inputs.setLayout(outer)
         inputs._compact_layout_applied = True
 
+    def _tighten_input_dock(self):
+        """Remove nonessential chrome and spacing from the parameter dock."""
+        dock = next(
+            (
+                candidate for candidate in self.findChildren(QtWidgets.QDockWidget)
+                if candidate.widget() is not None
+                and candidate.widget().isAncestorOf(self.inputs)
+            ),
+            None,
+        )
+        if dock is None:
+            return
+
+        title_bar = QtWidgets.QWidget(dock)
+        title_bar.setFixedHeight(0)
+        dock.setTitleBarWidget(title_bar)
+
+        dock_layout = dock.widget().layout()
+        file_index = dock_layout.indexOf(self.file_input)
+        if file_index > 0:
+            preceding_item = dock_layout.itemAt(file_index - 1)
+            if preceding_item.spacerItem() is not None:
+                dock_layout.takeAt(file_index - 1)
+
     def _add_manual_vth_button(self):
         """Add an idle-only, one-shot Vth measurement action to the GSS inputs."""
         self._manual_vth_active = False
@@ -453,9 +496,18 @@ class MainWindow(ManagedDockWindow):
         inputs_layout = self.inputs.layout()
         form_item = inputs_layout.itemAt(0)
         form = form_item.layout() if form_item is not None else None
-        anchor = getattr(self.inputs, 'post_shutdown_vth', None)
+        anchor = getattr(self.inputs, 'pre_start_vth', None)
         if isinstance(form, QtWidgets.QFormLayout) and anchor is not None:
-            row, _role = form.getWidgetPosition(anchor)
+            row = next(
+                (
+                    index for index in range(form.rowCount())
+                    if form.itemAt(index, QtWidgets.QFormLayout.ItemRole.SpanningRole)
+                    and form.itemAt(
+                        index, QtWidgets.QFormLayout.ItemRole.SpanningRole
+                    ).widget().isAncestorOf(anchor)
+                ),
+                -1,
+            )
             form.insertRow(row + 1, self.manual_vth_button)
         else:
             inputs_layout.addWidget(self.manual_vth_button)
